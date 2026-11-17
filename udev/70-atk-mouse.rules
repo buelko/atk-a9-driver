@@ -1,0 +1,5 @@
+# ATK / VXE / Compx Maeuse und Dongles: hidraw-Zugriff fuer normale Benutzer.
+# Betrifft u. a. den ATK Mouse 1K Dongle (373b:101a) der ATK A9 Ultra.
+# Muss vor 73-seat-late.rules einsortiert sein, damit uaccess greift.
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", GROUP="plugdev", MODE="0660", TAG+="uaccess"

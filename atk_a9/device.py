@@ -56,9 +56,9 @@ class DpiStage:
             r, g, b = self.color
             color = f"  #{r:02X}{g:02X}{b:02X}"
         if self.x is None:
-            return f"  Stufe {self.index}: [{self.raw.hex(' ')}] ungueltig{color}"
+            return f"[{self.raw.hex(' ')}] ungueltig{color}"
         same = "" if self.x == self.y else f" / y={self.y}"
-        return f"  Stufe {self.index}: DPI {self.x}{same}{color}"
+        return f"DPI {self.x}{same}{color}"
 
 
 @dataclass
@@ -120,10 +120,14 @@ class ButtonAssignment:
     label: str
     raw: bytes
 
+    @property
+    def slot(self) -> int:
+        return self.index + 1
+
     def describe(self) -> str:
         flag = "" if self.checksum_ok else "  [Pruefsumme defekt]"
         return (
-            f"  Slot {self.index + 1:<2} @{self.address:#06x} "
+            f"@{self.address:#06x} "
             f"[{self.raw[0]:02x} {self.raw[1]:02x} {self.raw[2]:02x} {self.raw[3]:02x}] "
             f"{self.label}{flag}"
         )
@@ -535,7 +539,7 @@ class AtkMouse:
                 f"(raw {raw.hex(' ')}, Kodierung {family})"
             )
         colors = self.read_dpi_colors(index + 1)
-        return DpiStage(index, address, got_x, got_y, raw, colors[index] if index < len(colors) else None)
+        return DpiStage(stage, address, got_x, got_y, raw, colors[index] if index < len(colors) else None)
 
     def set_dpi_color(self, stage: int, rgb: tuple[int, int, int]) -> None:
         index = stage - 1

@@ -1,6 +1,0 @@
-# ATK / VXE / Compx Maeuse und Dongles: hidraw-Zugriff fuer normale Benutzer.
-# Betrifft u. a. den ATK Mouse 1K Dongle (373b:101a) der ATK A9 Ultra.
-# Installieren: sudo cp 99-atk-mouse.rules /etc/udev/rules.d/ &&
-#               sudo udevadm control --reload && Dongle neu einstecken.
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", MODE="0660", TAG+="uaccess"
-KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="3554", MODE="0660", TAG+="uaccess"

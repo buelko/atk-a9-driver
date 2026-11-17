@@ -9,7 +9,8 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
-install -m 0644 "$HERE/udev/99-atk-mouse.rules" /etc/udev/rules.d/99-atk-mouse.rules
+rm -f /etc/udev/rules.d/99-atk-mouse.rules
+install -m 0644 "$HERE/udev/70-atk-mouse.rules" /etc/udev/rules.d/70-atk-mouse.rules
 udevadm control --reload
 udevadm trigger --subsystem-match=hidraw
 echo "udev-Regel installiert. Dongle einmal neu einstecken (oder es wirkt bereits)."
