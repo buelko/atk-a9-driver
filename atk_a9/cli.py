@@ -26,8 +26,8 @@ import json
 import sys
 
 from . import protocol as p
-from .device import AtkMouse
-from .hidraw import DeviceNotFound, list_hidraw_nodes, list_input_nodes
+from .device import AtkMouse, MouseOffline, WriteVerificationError
+from .hidraw import DeviceBusy, DeviceNotFound, list_hidraw_nodes, list_input_nodes
 
 
 def _connect(args: argparse.Namespace) -> AtkMouse:
@@ -369,11 +369,13 @@ def main(argv: list[str] | None = None) -> int:
             f"{exc}\nKeine Berechtigung fuer den hidraw-Knoten. "
             "udev-Regel installieren: sudo ./install.sh (danach Dongle neu einstecken)."
         )
+    except (MouseOffline, DeviceBusy) as exc:
+        return _fail(str(exc))
     except TimeoutError as exc:
         return _fail(
             f"{exc}\nKeine Antwort - Maus einschalten/bewegen und ATK HUB (falls offen) schliessen."
         )
-    except (p.ProtocolError, ValueError) as exc:
+    except (p.ProtocolError, ValueError, WriteVerificationError) as exc:
         return _fail(str(exc))
 
 

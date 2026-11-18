@@ -17,7 +17,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from atk_a9 import protocol as p  # noqa: E402
-from atk_a9.device import AtkMouse, WriteVerificationError  # noqa: E402
+from atk_a9.device import AtkMouse, MouseOffline, WriteVerificationError  # noqa: E402
 from atk_a9.fake import FakeAtkDevice  # noqa: E402
 from atk_a9.hidraw import (  # noqa: E402
     DeviceBusy,
@@ -172,6 +172,97 @@ class ButtonTests(unittest.TestCase):
             mouse.set_button(1, 0x01, 0x02)
 
 
+class SleepTests(unittest.TestCase):
+    def _mouse(self) -> tuple[AtkMouse, FakeAtkDevice]:
+        fake = FakeAtkDevice()
+        mouse = AtkMouse(fake, node())
+        mouse.identify()
+        return mouse, fake
+
+    def test_sleeping_mouse_is_reported_as_offline(self):
+        mouse, fake = self._mouse()
+        fake.asleep = True
+        with self.assertRaises(MouseOffline):
+            mouse.read_system()
+        with self.assertRaises(MouseOffline):
+            mouse.set_polling(500)
+        self.assertEqual(fake.writes, [])
+        self.assertEqual(fake.lock_depth, 0)  # Sperre wieder frei
+        fake.asleep = False
+        self.assertEqual(mouse.read_system().polling_hz, 1000)
+
+    def test_plain_timeout_stays_timeout_when_mouse_is_online(self):
+        mouse, fake = self._mouse()
+        original = fake.exchange
+
+        def flaky(frame, **kwargs):
+            if frame.cmd == p.Cmd.GET_EEPROM:
+                raise TimeoutError("keine Antwort")
+            return original(frame, **kwargs)
+
+        fake.exchange = flaky  # type: ignore[method-assign]
+        with self.assertRaises(TimeoutError) as ctx:
+            mouse.read_system()
+        self.assertNotIsInstance(ctx.exception, MouseOffline)
+
+    def test_busy_is_not_mistaken_for_sleep(self):
+        mouse, fake = self._mouse()
+
+        def busy(frame, **kwargs):
+            raise DeviceBusy("gesperrt")
+
+        fake.exchange = busy  # type: ignore[method-assign]
+        with self.assertRaises(DeviceBusy):
+            mouse.read_system()
+
+    def test_identify_survives_sleeping_mouse(self):
+        fake = FakeAtkDevice()
+        fake.asleep = True
+        mouse = AtkMouse(fake, node())
+        self.assertIsNone(mouse.identify())
+        self.assertIsNone(mouse.firmware_version())
+
+
+class DeviceDetailTests(unittest.TestCase):
+    def _mouse(self, **kwargs) -> tuple[AtkMouse, FakeAtkDevice]:
+        fake = FakeAtkDevice(**kwargs)
+        mouse = AtkMouse(fake, node())
+        mouse.identify()
+        return mouse, fake
+
+    def test_notes_do_not_pile_up(self):
+        fake = FakeAtkDevice(cid_mid=(0, 0))  # unbekanntes Modell -> Hinweis
+        mouse = AtkMouse(fake, node())
+        for _ in range(5):
+            mouse.dpi_family()
+        self.assertEqual(len(mouse.notes), 1)
+
+    def test_select_stage_respects_stage_count(self):
+        mouse, fake = self._mouse()  # 4 Stufen
+        self.assertEqual(mouse.select_stage(4).active_stage, 4)
+        writes = len(fake.writes)
+        for bad in (0, 5, 9):
+            with self.assertRaises(ValueError):
+                mouse.select_stage(bad)
+        self.assertEqual(len(fake.writes), writes)
+        self.assertEqual(fake.lock_depth, 0)
+
+    def test_firmware_version_with_non_bcd_bytes(self):
+        mouse, _ = self._mouse(firmware=(0x03, 0x00))
+        self.assertEqual(mouse.firmware_version(), "3.0")
+        mouse, _ = self._mouse(firmware=(0x1A, 0x0F))
+        self.assertEqual(mouse.firmware_version(), "1a.0f")
+
+    def test_connect_closes_handle_on_failure(self):
+        transport = mock.Mock()
+        with mock.patch("atk_a9.device.find_config_node", return_value=node()), \
+             mock.patch("atk_a9.device.HidrawTransport", return_value=transport), \
+             mock.patch("atk_a9.device.list_input_nodes", side_effect=OSError(5, "EIO")):
+            with self.assertRaises(OSError):
+                AtkMouse.connect()
+        transport.close.assert_called_once()
+
+
 class WorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         try:
@@ -218,10 +309,11 @@ class WorkerTests(unittest.TestCase):
         with mock.patch("atk_a9.gui.AtkMouse.connect", return_value=mouse) as connect:
             self._run(self._raise(TimeoutError("keine Antwort")))
             self._run(self._raise(DeviceBusy("gesperrt")))
+            self._run(self._raise(MouseOffline("schlaeft")))
             self._run(lambda _m: "ok")
         self.assertEqual(connect.call_count, 1)
         mouse.close.assert_not_called()
-        self.assertEqual(self.errors[1], "gesperrt")
+        self.assertEqual(self.errors[1:], ["gesperrt", "schlaeft"])
 
     def test_connect_failure_is_reported(self):
         with mock.patch("atk_a9.gui.AtkMouse.connect", side_effect=DeviceNotFound("kein Dongle")):

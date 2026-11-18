@@ -14,10 +14,11 @@ from typing import Any, Callable
 
 from . import protocol as p
 from .device import AtkMouse, MouseStatus
-from .device import WriteVerificationError
+from .device import MouseOffline, WriteVerificationError
 from .hidraw import DeviceBusy, DeviceNotFound
 
 POLL_BATTERY_MS = 60_000
+PUMP_MS = 40
 
 BUTTON_PRESETS: list[tuple[str, tuple[int, int, int] | None]] = [
     ("(unveraendert)", None),
@@ -64,11 +65,11 @@ class Worker(threading.Thread):
             if self.mouse is None:
                 self.mouse = AtkMouse.connect()
             result = work(self.mouse)
-        except DeviceBusy as exc:
+        except (DeviceBusy, MouseOffline) as exc:
+            # Verbindung ist in Ordnung und bleibt offen
             fail(str(exc))
         except TimeoutError:
-            # Maus schlaeft: Verbindung ist in Ordnung und bleibt offen
-            fail("Keine Antwort - Maus bewegen (Schlafmodus) und erneut versuchen.")
+            fail("Keine Antwort vom Geraet - bitte erneut versuchen.")
         except (p.ProtocolError, ValueError, WriteVerificationError) as exc:
             fail(str(exc))
         except (DeviceNotFound, OSError) as exc:
@@ -99,21 +100,47 @@ class App(tk.Tk):
         self.worker.start()
         self.status: MouseStatus | None = None
         self._busy = 0
+        # Tkinter ist nicht threadsicher: der Worker legt Rueckrufe nur in diese
+        # Queue, ausgefuehrt werden sie im Hauptthread (_pump).
+        self._ui_calls: "queue.Queue[Callable[[], None]]" = queue.Queue()
 
         self._build()
+        self.after(PUMP_MS, self._pump)
         self.after(200, self.refresh)
         self.after(POLL_BATTERY_MS, self._auto_battery)
 
     # -- Hilfen ------------------------------------------------------------
 
+    def _pump(self) -> None:
+        """Rueckrufe des Workers im Hauptthread ausfuehren."""
+        try:
+            while True:
+                call = self._ui_calls.get_nowait()
+                try:
+                    call()
+                except Exception as exc:  # noqa: BLE001 - Pumpe muss weiterlaufen
+                    self.statusbar.config(text=f"Anzeigefehler: {type(exc).__name__}: {exc}")
+        except queue.Empty:
+            pass
+        self.after(PUMP_MS, self._pump)
+
     def run_job(self, work: Callable[[AtkMouse], Any], done: Callable[[Any], None] | None = None) -> None:
         self._set_busy(True)
 
-        def on_done(result: Any) -> None:
-            self.after(0, lambda: (self._set_busy(False), done(result) if done else None))
+        def finish_ok(result: Any) -> None:
+            self._set_busy(False)
+            if done:
+                done(result)
 
-        def on_fail(message: str) -> None:
-            self.after(0, lambda: (self._set_busy(False), self._show_error(message)))
+        def finish_fail(message: str) -> None:
+            self._set_busy(False)
+            self._show_error(message)
+
+        def on_done(result: Any) -> None:  # laeuft im Worker-Thread
+            self._ui_calls.put(lambda: finish_ok(result))
+
+        def on_fail(message: str) -> None:  # laeuft im Worker-Thread
+            self._ui_calls.put(lambda: finish_fail(message))
 
         self.worker.submit(work, on_done, on_fail)
 
@@ -287,7 +314,7 @@ class App(tk.Tk):
         def done(batt: Any) -> None:
             self._apply_battery(batt.percent, batt.charging)
 
-        self.worker.submit(work, lambda b: self.after(0, lambda: done(b)), lambda _msg: None)
+        self.worker.submit(work, lambda b: self._ui_calls.put(lambda: done(b)), lambda _msg: None)
         self.after(POLL_BATTERY_MS, self._auto_battery)
 
     def _apply_battery(self, percent: int | None, charging: bool | None) -> None:

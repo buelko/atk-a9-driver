@@ -22,6 +22,7 @@ from typing import Any, Iterable, Sequence
 from . import protocol as p
 from .catalog import Model, find_model, generic_model, polling_options, RECEIVER_MAX_POLLING
 from .hidraw import (
+    DeviceBusy,
     DeviceNotFound,
     HidrawNode,
     HidrawTransport,
@@ -34,6 +35,17 @@ from .hidraw import (
 
 class WriteVerificationError(RuntimeError):
     """Geschriebener Wert wurde zurueckgelesen, weicht aber ab."""
+
+
+class MouseOffline(TimeoutError):
+    """Der Dongle antwortet, meldet die Maus aber als nicht verbunden
+    (Schlafmodus, ausgeschaltet oder ausser Reichweite)."""
+
+
+def _bcd(value: int) -> str:
+    """Versionsbyte ist BCD-kodiert (0x30 -> '30'); sonst hex anzeigen."""
+    text = f"{value:02x}"
+    return str(int(text)) if text.isdigit() else text
 
 
 # ---------------------------------------------------------------------------
@@ -222,18 +234,27 @@ class AtkMouse:
             node = find_config_node(vendors, product_id=product)
         transport = HidrawTransport(node, timeout=timeout, verbose=verbose)
         transport.open()
-        inputs = [i for i in list_input_nodes((node.vendor,)) if node.physical and node.physical in i.physical]
-        mouse = cls(transport, node, inputs, verbose=verbose)
-        if identify:
-            try:
-                mouse.identify()
-            except (TimeoutError, p.ProtocolError) as exc:
-                mouse.notes.append(f"CID/MID nicht lesbar: {exc}")
-        mouse.system_len = mouse.system_row_length()
+        try:
+            inputs = [i for i in list_input_nodes((node.vendor,)) if node.physical and node.physical in i.physical]
+            mouse = cls(transport, node, inputs, verbose=verbose)
+            if identify:
+                try:
+                    mouse.identify()
+                except (TimeoutError, p.ProtocolError) as exc:
+                    mouse._note(f"CID/MID nicht lesbar: {exc}")
+            mouse.system_len = mouse.system_row_length()
+        except BaseException:
+            transport.close()  # kein offener Handle bei fehlgeschlagenem Verbinden
+            raise
         return mouse
 
     def close(self) -> None:
         self.transport.close()
+
+    def _note(self, text: str) -> None:
+        """Hinweis merken - jeden nur einmal (die GUI haelt das Objekt lange)."""
+        if text not in self.notes:
+            self.notes.append(text)
 
     def __enter__(self) -> "AtkMouse":
         return self
@@ -250,9 +271,21 @@ class AtkMouse:
         ok_status: tuple[int, ...] = (0x00,),
         expect_address: int | None = None,
     ) -> p.Frame:
-        response = self.transport.exchange(
-            frame, expect_cmd=expect, ok_status=ok_status, expect_address=expect_address
-        )
+        try:
+            response = self.transport.exchange(
+                frame, expect_cmd=expect, ok_status=ok_status, expect_address=expect_address
+            )
+        except DeviceBusy:
+            raise
+        except TimeoutError as exc:
+            # Der Dongle beantwortet 0x03 selbst, auch wenn die Maus schlaeft.
+            # So laesst sich "Maus nicht verbunden" von anderen Ausfaellen trennen.
+            if frame.cmd != p.Cmd.GET_ONLINE and self._mouse_offline():
+                raise MouseOffline(
+                    "Maus ist nicht verbunden (Schlafmodus oder ausgeschaltet). "
+                    "Maus bewegen oder klicken und erneut versuchen."
+                ) from exc
+            raise
         if self.verbose:
             print(f"  -> {frame.build().hex(' ')}")
             print(f"  <- {response.hex()}")
@@ -272,6 +305,16 @@ class AtkMouse:
             expect=expect if expect is not None else cmd,
             ok_status=ok_status,
         )
+
+    def _mouse_offline(self) -> bool:
+        """True nur, wenn der Dongle ausdruecklich 'nicht verbunden' meldet."""
+        try:
+            response = self.transport.exchange(
+                p.Frame(cmd=p.Cmd.GET_ONLINE), expect_cmd=int(p.Cmd.GET_ONLINE)
+            )
+        except (TimeoutError, p.ProtocolError, OSError):
+            return False
+        return bool(response.raw_data) and response.raw_data[0] == 0
 
     # -- Identifikation -----------------------------------------------------
 
@@ -295,13 +338,13 @@ class AtkMouse:
         data = response.raw_data
         if len(data) < 2:
             return None
-        return f"{int(f'{data[0]:02x}')}.{int(f'{data[1]:02x}')}"
+        return f"{_bcd(data[0])}.{_bcd(data[1])}"
 
     def receiver_version(self) -> str | None:
         try:
             response = self.command(p.Cmd.GET_RECEIVER_VERSION, expect=p.Cmd.GET_RECEIVER_VERSION)
         except (TimeoutError, p.ProtocolError) as exc:
-            self.notes.append(f"Empfaenger-Version nicht lesbar: {exc}")
+            self._note(f"Empfaenger-Version nicht lesbar: {exc}")
             return None
         value = (response.raw_data[0] << 8) | response.raw_data[1] if len(response.raw_data) >= 2 else 0
         return f"0x{value:04x}" if value else None
@@ -443,11 +486,12 @@ class AtkMouse:
 
     def select_stage(self, stage: int) -> SystemRow:
         """Aktive DPI-Stufe (0-basiert im EEPROM, 1-basiert in der CLI)."""
-        index = stage - 1
-        if index < 0:
-            raise ValueError("DPI-Stufen beginnen bei 1")
-        self._update_pairs(p.Eeprom.SYSTEM, self.system_row_length(), {4: index})
-        return self.read_system()
+        with self.transport.locked():
+            count = self.read_system().stage_count or p.DPI_STAGE_COUNT_MAX
+            if not 1 <= stage <= count:
+                raise ValueError(f"DPI-Stufe {stage} ausserhalb 1..{count}")
+            self._update_pairs(p.Eeprom.SYSTEM, self.system_row_length(), {4: stage - 1})
+            return self.read_system()
 
     # -- Lift-off (0x000A) -------------------------------------------------
 
@@ -703,7 +747,7 @@ class AtkMouse:
         try:
             response = self.command(p.Cmd.GET_FAR_DISTANCE, expect=p.Cmd.GET_FAR_DISTANCE)
         except (TimeoutError, p.ProtocolError) as exc:
-            self.notes.append(f"Reichweiten-Modus nicht lesbar: {exc}")
+            self._note(f"Reichweiten-Modus nicht lesbar: {exc}")
             return None
         return p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
 
@@ -711,7 +755,7 @@ class AtkMouse:
         try:
             response = self.command(p.Cmd.GET_DONGLE_LIGHT, expect=p.Cmd.GET_DONGLE_LIGHT)
         except (TimeoutError, p.ProtocolError) as exc:
-            self.notes.append(f"Dongle-LED nicht lesbar: {exc}")
+            self._note(f"Dongle-LED nicht lesbar: {exc}")
             return None
         return p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
 
@@ -719,7 +763,7 @@ class AtkMouse:
         try:
             response = self.command(p.Cmd.GET_CURRENT_CONFIG, expect=p.Cmd.GET_CURRENT_CONFIG)
         except (TimeoutError, p.ProtocolError) as exc:
-            self.notes.append(f"Aktives Profil nicht lesbar: {exc}")
+            self._note(f"Aktives Profil nicht lesbar: {exc}")
             return None
         value = p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
         return value + 1 if value is not None and value < 8 else value
@@ -738,7 +782,7 @@ class AtkMouse:
     def dpi_family(self) -> str:
         if self.model and self.model.dpi_family in p.DPI_FAMILIES:
             return self.model.dpi_family
-        self.notes.append(
+        self._note(
             f"DPI-Kodierung 'step50' vermutet (Sensor {self.sensor_name() or 'unbekannt'}); "
             "Modell nicht eindeutig identifiziert"
         )
@@ -771,13 +815,13 @@ class AtkMouse:
                 millivolts=parsed.voltage_mv,
             )
         except (TimeoutError, p.ProtocolError) as exc:
-            self.notes.append(f"Batterie nicht lesbar: {exc}")
+            self._note(f"Batterie nicht lesbar: {exc}")
         angle: tuple[int, bool] | None = None
         if self.model is None or self.model.supports("noSensorAngle"):
             try:
                 angle = self.read_angle()
             except (TimeoutError, p.ProtocolError) as exc:
-                self.notes.append(f"Winkel nicht lesbar: {exc}")
+                self._note(f"Winkel nicht lesbar: {exc}")
         buttons = self.read_buttons() if include_buttons else []
         lo, hi, family = self.dpi_limits()
         return MouseStatus(

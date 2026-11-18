@@ -27,6 +27,8 @@ class FakeAtkDevice:
         self.verbose = False
         self.opened = 0
         self.lock_depth = 0
+        # True: Maus schlaeft - nur der Dongle antwortet noch (0x03 Online-Status)
+        self.asleep = False
         self.cid_mid = cid_mid
         self.firmware = firmware
         self.battery = [100, 0]
@@ -56,6 +58,8 @@ class FakeAtkDevice:
             if expect_cmd is None
             else (expect_cmd if isinstance(expect_cmd, (tuple, set, frozenset)) else (expect_cmd,))
         )
+        if self.asleep and request.cmd != p.Cmd.GET_ONLINE:
+            raise TimeoutError("Keine Antwort (simulierter Schlafmodus)")
         response = self._handle(request)
         if expect_address is not None and response.address != expect_address:
             raise p.ProtocolError(
@@ -123,7 +127,7 @@ class FakeAtkDevice:
         if cmd == p.Cmd.GET_BATTERY:
             return p.Frame(cmd=cmd, data=bytes(self.battery), declared=len(self.battery))
         if cmd == p.Cmd.GET_ONLINE:
-            return p.Frame(cmd=cmd, data=bytes([1, 0xAB, 0xCD, 0xEF]), declared=1)
+            return p.Frame(cmd=cmd, data=bytes([0 if self.asleep else 1, 0xAB, 0xCD, 0xEF]), declared=1)
         if cmd in (p.Cmd.GET_EEPROM, p.Cmd.SET_EEPROM):
             return self._eeprom(request)
         return p.Frame(cmd=cmd, status=0x01)
