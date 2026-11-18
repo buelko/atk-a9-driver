@@ -1,0 +1,234 @@
+"""Tests fuer den hidraw-Transport und den GUI-Worker (ohne Hardware).
+
+Das "Geraet" ist das andere Ende eines SOCK_SEQPACKET-Paares: wie bei hidraw
+bleibt jede Nachricht ein eigener Report.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+import sys
+import tempfile
+import threading
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from atk_a9 import protocol as p  # noqa: E402
+from atk_a9.device import AtkMouse, WriteVerificationError  # noqa: E402
+from atk_a9.fake import FakeAtkDevice  # noqa: E402
+from atk_a9.hidraw import (  # noqa: E402
+    DeviceBusy,
+    DeviceNotFound,
+    HidrawNode,
+    HidrawTransport,
+    ReportInfo,
+    ReportSizes,
+)
+
+
+def node(path: str = "/dev/hidraw-test") -> HidrawNode:
+    return HidrawNode(
+        path=path,
+        name="Test",
+        vendor=0x373B,
+        product=0x101A,
+        interface=1,
+        reports=ReportInfo(reports={0x08: ReportSizes(input=16, output=16)}),
+    )
+
+
+class SocketDevice:
+    """Beantwortet eine Anfrage mit einer vorgegebenen Folge von Reports."""
+
+    def __init__(self, replies) -> None:
+        self.host, self.peer = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.host.setblocking(False)
+        self.transport = HidrawTransport(node(), timeout=1.0)
+        self.transport.fd = os.dup(self.host.fileno())
+        self.requests: list[bytes] = []
+        self.thread = threading.Thread(target=self._serve, args=(replies,), daemon=True)
+        self.thread.start()
+
+    def _serve(self, replies) -> None:
+        self.requests.append(self.peer.recv(64))
+        for reply in replies:
+            self.peer.send(reply)
+
+    def close(self) -> None:
+        self.thread.join(2)
+        self.transport.close()
+        self.host.close()
+        self.peer.close()
+
+
+def eeprom_reply(address: int, data: bytes) -> bytes:
+    return p.Frame(cmd=p.Cmd.GET_EEPROM, address=address, data=data, declared=len(data)).build()
+
+
+class ExchangeTests(unittest.TestCase):
+    def _mouse(self, replies) -> tuple[AtkMouse, SocketDevice]:
+        device = SocketDevice(replies)
+        self.addCleanup(device.close)
+        return AtkMouse(device.transport, node()), device
+
+    def test_reply_for_other_address_is_skipped(self):
+        """Antwort auf die Anfrage eines anderen Prozesses darf nicht als
+        eigene Antwort durchgehen (sonst schreibt Read-Modify-Write Muell)."""
+        foreign = eeprom_reply(0x0060, bytes([0x01, 0x01, 0x00, 0x53]))
+        own = eeprom_reply(0x00A9, bytes([0x02, 0x53, 0x01, 0x54]))
+        mouse, _ = self._mouse([foreign, own])
+        self.assertEqual(mouse.read_eeprom(0x00A9, 4), bytes([0x02, 0x53, 0x01, 0x54]))
+
+    def test_only_foreign_reply_times_out(self):
+        mouse, device = self._mouse([eeprom_reply(0x0060, bytes(4))])
+        device.transport.timeout = 0.2
+        with self.assertRaises(TimeoutError):
+            mouse.read_eeprom(0x00A9, 4)
+
+    def test_empty_and_foreign_reports_are_ignored(self):
+        own = eeprom_reply(0x0000, bytes([0x01, 0x54]))
+        mouse, _ = self._mouse([b"", b"\x01\x00\x05\x00", own])
+        self.assertEqual(mouse.read_eeprom(0x0000, 2), bytes([0x01, 0x54]))
+
+
+class LockTests(unittest.TestCase):
+    def setUp(self) -> None:
+        handle = tempfile.NamedTemporaryFile(delete=False)
+        handle.close()
+        self.path = handle.name
+        self.addCleanup(os.unlink, self.path)
+
+    def _transport(self) -> HidrawTransport:
+        transport = HidrawTransport(node(self.path))
+        transport.open()
+        self.addCleanup(transport.close)
+        return transport
+
+    def test_second_handle_is_locked_out(self):
+        first, second = self._transport(), self._transport()
+        with first.locked():
+            with self.assertRaises(DeviceBusy):
+                with second.locked(timeout=0.1):
+                    pass
+        with second.locked(timeout=0.1):
+            pass
+
+    def test_lock_is_reentrant(self):
+        first, second = self._transport(), self._transport()
+        with first.locked():
+            with first.locked():
+                pass
+            # innere Freigabe darf die aeussere Sperre nicht aufheben
+            with self.assertRaises(DeviceBusy):
+                with second.locked(timeout=0.1):
+                    pass
+
+    def test_update_holds_lock_across_read_and_write(self):
+        fake = FakeAtkDevice()
+        depths: list[int] = []
+        original = fake.exchange
+
+        def spy(frame, **kwargs):
+            depths.append(fake.lock_depth)
+            return original(frame, **kwargs)
+
+        fake.exchange = spy  # type: ignore[method-assign]
+        mouse = AtkMouse(fake, node())
+        mouse.identify()
+        depths.clear()
+        mouse.set_polling(500)
+        # lesen + schreiben + verifizieren laufen unter der Sperre
+        self.assertGreaterEqual(len(depths), 3)
+        self.assertTrue(all(depth >= 1 for depth in depths[:3]), depths)
+
+
+class ButtonTests(unittest.TestCase):
+    def test_set_button_after_unprogrammed_slot(self):
+        """Ein leerer Slot davor liess read_buttons() abbrechen -> IndexError."""
+        fake = FakeAtkDevice()
+        fake.eeprom[0x0060 + 4 : 0x0060 + 8] = bytes(4)  # Slot 2 unprogrammiert
+        mouse = AtkMouse(fake, node())
+        got = mouse.set_button(5, 0x01, 0x08)
+        self.assertEqual((got.slot, got.cls, got.value1), (5, 0x01, 0x08))
+        self.assertTrue(got.checksum_ok)
+        self.assertEqual(bytes(fake.eeprom[0x0070:0x0074]), got.raw)
+
+    def test_set_button_detects_failed_write(self):
+        fake = FakeAtkDevice()
+        mouse = AtkMouse(fake, node())
+        original = fake._eeprom
+
+        def swallow(request):
+            response = original(request)
+            if request.cmd == p.Cmd.SET_EEPROM:
+                fake.eeprom[request.address] ^= 0xFF
+            return response
+
+        fake._eeprom = swallow  # type: ignore[method-assign]
+        with self.assertRaises(WriteVerificationError):
+            mouse.set_button(1, 0x01, 0x02)
+
+
+class WorkerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        try:
+            from atk_a9.gui import Worker
+        except ImportError as exc:  # tkinter fehlt
+            self.skipTest(str(exc))
+        self.worker = Worker()
+        self.results: list = []
+        self.errors: list[str] = []
+
+    def _run(self, work) -> None:
+        self.worker.run_one(work, self.results.append, self.errors.append)
+
+    def _raise(self, exc: BaseException):
+        def work(_mouse):
+            raise exc
+
+        return work
+
+    def test_survives_unexpected_errors(self):
+        mouse = mock.Mock()
+        with mock.patch("atk_a9.gui.AtkMouse.connect", return_value=mouse):
+            self._run(self._raise(WriteVerificationError("soll/ist")))
+            self.assertIs(self.worker.mouse, mouse)  # Verbindung bleibt
+            self._run(self._raise(IndexError("list index out of range")))
+            self.assertIsNone(self.worker.mouse)
+            self._run(lambda _m: 42)
+        self.assertEqual(len(self.errors), 2)
+        self.assertIn("IndexError", self.errors[1])
+        self.assertEqual(self.results, [42])
+
+    def test_reconnects_after_device_error(self):
+        first, second = mock.Mock(), mock.Mock()
+        with mock.patch("atk_a9.gui.AtkMouse.connect", side_effect=[first, second]) as connect:
+            self._run(self._raise(OSError(19, "No such device")))
+            first.close.assert_called_once()
+            self.assertIsNone(self.worker.mouse)
+            self._run(lambda m: m)
+        self.assertEqual(connect.call_count, 2)
+        self.assertEqual(self.results, [second])
+
+    def test_timeout_and_busy_keep_connection(self):
+        mouse = mock.Mock()
+        with mock.patch("atk_a9.gui.AtkMouse.connect", return_value=mouse) as connect:
+            self._run(self._raise(TimeoutError("keine Antwort")))
+            self._run(self._raise(DeviceBusy("gesperrt")))
+            self._run(lambda _m: "ok")
+        self.assertEqual(connect.call_count, 1)
+        mouse.close.assert_not_called()
+        self.assertEqual(self.errors[1], "gesperrt")
+
+    def test_connect_failure_is_reported(self):
+        with mock.patch("atk_a9.gui.AtkMouse.connect", side_effect=DeviceNotFound("kein Dongle")):
+            self._run(lambda _m: 1)
+        self.assertEqual(self.errors, ["kein Dongle"])
+        self.assertEqual(self.results, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

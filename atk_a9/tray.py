@@ -20,7 +20,7 @@ import cairo  # noqa: E402
 
 from . import protocol as p  # noqa: E402
 from .device import AtkMouse  # noqa: E402
-from .hidraw import DeviceNotFound  # noqa: E402
+from .hidraw import DeviceBusy, DeviceNotFound  # noqa: E402
 
 INTERVAL_SECONDS = 120
 RETRY_SECONDS = 30
@@ -139,6 +139,9 @@ class TrayApp:
                 response = mouse.command(p.Cmd.GET_BATTERY, expect=p.Cmd.GET_BATTERY)
                 battery = p.parse_battery(response.data, response.declared)
                 percent, charging = battery.percent, bool(battery.charging)
+        except DeviceBusy as exc:
+            note = str(exc)
+            retry = True
         except TimeoutError:
             note = "Maus schlaeft (bewegen zum Aufwecken)"
             retry = True

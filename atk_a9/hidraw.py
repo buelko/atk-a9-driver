@@ -12,6 +12,7 @@ Enthaelt:
 from __future__ import annotations
 
 import array
+import contextlib
 import errno
 import fcntl
 import glob
@@ -21,7 +22,7 @@ import select
 import struct
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Iterable, Iterator, Sequence
 
 from .protocol import FRAME_LEN, REPORT_ID, Cmd, Frame, ProtocolError
 
@@ -434,6 +435,13 @@ class DeviceNotFound(RuntimeError):
     pass
 
 
+class DeviceBusy(TimeoutError):
+    """Ein anderer Prozess (Tray, GUI, CLI) haelt die Geraetesperre zu lange."""
+
+
+LOCK_TIMEOUT = 5.0
+
+
 # ---------------------------------------------------------------------------
 # Transport
 # ---------------------------------------------------------------------------
@@ -447,6 +455,7 @@ class HidrawTransport:
         self.timeout = timeout
         self.verbose = verbose
         self.fd: int | None = None
+        self._lock_depth = 0
 
     # -- Lebenszyklus ---------------------------------------------------
     def open(self) -> "HidrawTransport":
@@ -465,8 +474,46 @@ class HidrawTransport:
 
     def close(self) -> None:
         if self.fd is not None:
-            os.close(self.fd)
+            os.close(self.fd)  # gibt auch eine evtl. gehaltene flock-Sperre frei
             self.fd = None
+        self._lock_depth = 0
+
+    @contextlib.contextmanager
+    def locked(self, timeout: float = LOCK_TIMEOUT) -> Iterator[None]:
+        """Exklusive Sperre ueber Prozessgrenzen (flock auf dem hidraw-Knoten).
+
+        Jeder offene Handle sieht alle Antworten des Geraets. Ohne Sperre
+        koennten sich Tray, GUI und CLI gegenseitig Antworten unterschieben.
+        Die Sperre ist wiedereintrittsfaehig, damit Lesen-Aendern-Schreiben
+        als Ganzes geschuetzt werden kann.
+        """
+        self.open()
+        assert self.fd is not None
+        if self._lock_depth == 0:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise DeviceBusy(
+                            f"{self.node.path} wird von einem anderen Programm benutzt "
+                            f"(seit {timeout:.0f}s gesperrt)."
+                        ) from None
+                    time.sleep(0.02)
+        self._lock_depth += 1
+        try:
+            yield
+        finally:
+            # close() kann die Sperre inzwischen schon freigegeben haben
+            if self._lock_depth > 0:
+                self._lock_depth -= 1
+                if self._lock_depth == 0 and self.fd is not None:
+                    try:
+                        fcntl.flock(self.fd, fcntl.LOCK_UN)
+                    except OSError:
+                        pass
 
     def __enter__(self) -> "HidrawTransport":
         return self.open()
@@ -511,7 +558,7 @@ class HidrawTransport:
                 raise
             if self.verbose:
                 print(f"<< {raw.hex(' ')}")
-            if raw[0] != REPORT_ID:
+            if not raw or raw[0] != REPORT_ID:
                 continue  # laufende Eingabereports (Mausbewegung) ignorieren
             if len(raw) not in (FRAME_LEN, FRAME_LEN - 1):
                 continue
@@ -525,9 +572,23 @@ class HidrawTransport:
         frame: Frame,
         expect_cmd: int | tuple[int, ...] | None = None,
         ok_status: tuple[int, ...] = (0x00,),
+        expect_address: int | None = None,
     ) -> Frame:
-        """Frame senden und zugehoerige Antwort zurueckgeben."""
-        self.open()
+        """Frame senden und zugehoerige Antwort zurueckgeben.
+
+        Mit ``expect_address`` werden Antworten mit anderer Adresse verworfen
+        (z. B. verspaetete Antworten auf eine fruehere Anfrage).
+        """
+        with self.locked():
+            return self._exchange_locked(frame, expect_cmd, ok_status, expect_address)
+
+    def _exchange_locked(
+        self,
+        frame: Frame,
+        expect_cmd: int | tuple[int, ...] | None,
+        ok_status: tuple[int, ...],
+        expect_address: int | None,
+    ) -> Frame:
         assert self.fd is not None
         expected: tuple[int, ...] = (
             (frame.cmd,)
@@ -544,6 +605,8 @@ class HidrawTransport:
                     f"Keine Antwort auf Kommando {'/'.join(f'{c:04x}' for c in expected)} "
                     f"({self.timeout:.1f}s). Maus evtl. im Schlafmodus - erst bewegen/Klick."
                 )
+            if expect_address is not None and response.address != expect_address:
+                continue  # Antwort gehoert zu einer anderen Anfrage
             if response.cmd in expected:
                 if response.status not in ok_status:
                     raise ProtocolError(

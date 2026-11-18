@@ -13,6 +13,8 @@ Imitiert die fuer echte ATK/VXE-Maeuse verifizierten Protokoll-Eigenheiten:
 
 from __future__ import annotations
 
+import contextlib
+
 from . import protocol as p
 
 
@@ -24,6 +26,7 @@ class FakeAtkDevice:
         self.timeout = 1.0
         self.verbose = False
         self.opened = 0
+        self.lock_depth = 0
         self.cid_mid = cid_mid
         self.firmware = firmware
         self.battery = [100, 0]
@@ -38,7 +41,15 @@ class FakeAtkDevice:
     def close(self) -> None:
         self.opened = max(0, self.opened - 1)
 
-    def exchange(self, frame: p.Frame, expect_cmd=None, ok_status=(0x00,)) -> p.Frame:
+    @contextlib.contextmanager
+    def locked(self, timeout: float = 0.0):
+        self.lock_depth += 1
+        try:
+            yield
+        finally:
+            self.lock_depth -= 1
+
+    def exchange(self, frame: p.Frame, expect_cmd=None, ok_status=(0x00,), expect_address=None) -> p.Frame:
         request = p.Frame.parse(frame.build())
         expected: tuple[int, ...] = (
             (frame.cmd,)
@@ -46,6 +57,10 @@ class FakeAtkDevice:
             else (expect_cmd if isinstance(expect_cmd, (tuple, set, frozenset)) else (expect_cmd,))
         )
         response = self._handle(request)
+        if expect_address is not None and response.address != expect_address:
+            raise p.ProtocolError(
+                f"Antwort-Adresse {response.address:#06x} != erwartet {expect_address:#06x}"
+            )
         if response.cmd not in expected:
             raise p.ProtocolError(f"Antwort {response.cmd:04x} nicht erwartet {expected}")
         if response.status not in ok_status:

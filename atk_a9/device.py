@@ -248,8 +248,11 @@ class AtkMouse:
         frame: p.Frame,
         expect: int | tuple[int, ...] | None = None,
         ok_status: tuple[int, ...] = (0x00,),
+        expect_address: int | None = None,
     ) -> p.Frame:
-        response = self.transport.exchange(frame, expect_cmd=expect, ok_status=ok_status)
+        response = self.transport.exchange(
+            frame, expect_cmd=expect, ok_status=ok_status, expect_address=expect_address
+        )
         if self.verbose:
             print(f"  -> {frame.build().hex(' ')}")
             print(f"  <- {response.hex()}")
@@ -341,6 +344,9 @@ class AtkMouse:
                     declared=chunk,
                 ),
                 expect=(int(p.Cmd.GET_EEPROM), int(p.Cmd.SET_EEPROM)),
+                # Die Firmware wiederholt die Adresse in der Antwort; fremde
+                # oder verspaetete Antworten werden so aussortiert.
+                expect_address=address + offset,
             )
             got = response.raw_data[:chunk]
             if len(got) < chunk:
@@ -356,19 +362,20 @@ class AtkMouse:
         self, address: int, data: bytes, verify: bool = True, chunk: int = p.MAX_DATA
     ) -> None:
         """SetEEPROM (0x07). Schreibvorgaenge bleiben innerhalb der Record-Grenzen."""
-        for offset in range(0, len(data), chunk):
-            part = data[offset : offset + chunk]
-            self._exchange(
-                p.Frame(cmd=p.Cmd.SET_EEPROM, address=address + offset, data=part),
-                expect=(int(p.Cmd.SET_EEPROM), int(p.Cmd.GET_EEPROM)),
-            )
-        if verify:
-            back = self.read_eeprom(address, len(data))
-            if back != data:
-                raise WriteVerificationError(
-                    f"Schreiben nach {address:#06x} nicht verifiziert:\n"
-                    f"  soll: {data.hex(' ')}\n  ist:  {back.hex(' ')}"
+        with self.transport.locked():
+            for offset in range(0, len(data), chunk):
+                part = data[offset : offset + chunk]
+                self._exchange(
+                    p.Frame(cmd=p.Cmd.SET_EEPROM, address=address + offset, data=part),
+                    expect=(int(p.Cmd.SET_EEPROM), int(p.Cmd.GET_EEPROM)),
                 )
+            if verify:
+                back = self.read_eeprom(address, len(data))
+                if back != data:
+                    raise WriteVerificationError(
+                        f"Schreiben nach {address:#06x} nicht verifiziert:\n"
+                        f"  soll: {data.hex(' ')}\n  ist:  {back.hex(' ')}"
+                    )
 
     def _read_row(self, address: int, length: int) -> bytearray:
         return bytearray(self.read_eeprom(address, length))
@@ -378,6 +385,13 @@ class AtkMouse:
         for offset, value in updates.items():
             row[offset], row[offset + 1] = p.pair(value)
         self.write_eeprom(address, bytes(row))
+
+    def _update_pairs(self, address: int, length: int, updates: dict[int, int]) -> None:
+        """Lesen-Aendern-Schreiben unter einer Sperre, damit kein anderer
+        Prozess (Tray, GUI, CLI) dazwischen dieselbe Zeile veraendert."""
+        with self.transport.locked():
+            row = self._read_row(address, length)
+            self._write_pairs(address, row, updates)
 
     # -- Systemzeile (0x0000) ----------------------------------------------
 
@@ -418,15 +432,13 @@ class AtkMouse:
         code = p.polling_to_code(hz)
         if code is None:
             raise ValueError(f"Polling-Rate {hz} Hz wird nicht unterstuetzt")
-        row = self._read_row(p.Eeprom.SYSTEM, self.system_row_length())
-        self._write_pairs(p.Eeprom.SYSTEM, row, {0: code})
+        self._update_pairs(p.Eeprom.SYSTEM, self.system_row_length(), {0: code})
         return self.read_system()
 
     def set_stage_count(self, count: int) -> SystemRow:
         if not 1 <= count <= p.DPI_STAGE_COUNT_MAX:
             raise ValueError(f"DPI-Stufen {count} ausserhalb 1..{p.DPI_STAGE_COUNT_MAX}")
-        row = self._read_row(p.Eeprom.SYSTEM, self.system_row_length())
-        self._write_pairs(p.Eeprom.SYSTEM, row, {2: count})
+        self._update_pairs(p.Eeprom.SYSTEM, self.system_row_length(), {2: count})
         return self.read_system()
 
     def select_stage(self, stage: int) -> SystemRow:
@@ -434,8 +446,7 @@ class AtkMouse:
         index = stage - 1
         if index < 0:
             raise ValueError("DPI-Stufen beginnen bei 1")
-        row = self._read_row(p.Eeprom.SYSTEM, self.system_row_length())
-        self._write_pairs(p.Eeprom.SYSTEM, row, {4: index})
+        self._update_pairs(p.Eeprom.SYSTEM, self.system_row_length(), {4: index})
         return self.read_system()
 
     # -- Lift-off (0x000A) -------------------------------------------------
@@ -466,8 +477,7 @@ class AtkMouse:
                     + ", ".join(f"{v} mm" for v in sorted(table.codes.values()))
                     + " (oder 'code:N')"
                 )
-        row = self._read_row(p.Eeprom.LOD, p.LOD_LEN)
-        self._write_pairs(p.Eeprom.LOD, row, {0: code})
+        self._update_pairs(p.Eeprom.LOD, p.LOD_LEN, {0: code})
         return self.read_lod()
 
     # -- DPI (0x000C) -------------------------------------------------------
@@ -589,8 +599,7 @@ class AtkMouse:
             updates[8] = int(ripple)
         if not updates:
             raise ValueError("keine Aenderung angegeben")
-        row = self._read_row(p.Eeprom.ADVANCED, p.ADVANCED_LEN)
-        self._write_pairs(p.Eeprom.ADVANCED, row, updates)
+        self._update_pairs(p.Eeprom.ADVANCED, p.ADVANCED_LEN, updates)
         return self.read_advanced()
 
     # -- Sensor (0x00B5) ----------------------------------------------------
@@ -610,8 +619,7 @@ class AtkMouse:
         mapping = {"basic": 0, "base": 0, "competitive": 1, "shard": 1, "leistung": 1}
         if mode not in mapping:
             raise ValueError(f"Sensor-Modus {mode!r} nicht in {sorted(mapping)}")
-        row = self._read_row(p.Eeprom.SENSOR, p.SENSOR_LEN)
-        self._write_pairs(p.Eeprom.SENSOR, row, {4: mapping[mode]})
+        self._update_pairs(p.Eeprom.SENSOR, p.SENSOR_LEN, {4: mapping[mode]})
         return self.read_sensor_row()
 
     def read_angle(self) -> tuple[float, bool] | None:
@@ -637,25 +645,23 @@ class AtkMouse:
             if raw == b"\x00" * 4:
                 # unprogrammierter Slot: Ende der Tastenmatrix
                 break
-            if raw == b"\xff" * 4:
-                out.append(
-                    ButtonAssignment(index, address, 0xFF, 0xFF, 0xFF, False, "leer (0xff)", raw)
-                )
-                continue
-            ok = sum(raw) & 0xFF == p.CHECKSUM_TARGET
-            out.append(
-                ButtonAssignment(
-                    index=index,
-                    address=address,
-                    cls=raw[0],
-                    value1=raw[1],
-                    value2=raw[2],
-                    checksum_ok=ok,
-                    label=p.describe_button_action(raw[0], raw[1], raw[2]),
-                    raw=raw,
-                )
-            )
+            out.append(self._button_from_raw(index, address, raw))
         return out
+
+    @staticmethod
+    def _button_from_raw(index: int, address: int, raw: bytes) -> ButtonAssignment:
+        if raw == b"\xff" * 4:
+            return ButtonAssignment(index, address, 0xFF, 0xFF, 0xFF, False, "leer (0xff)", raw)
+        return ButtonAssignment(
+            index=index,
+            address=address,
+            cls=raw[0],
+            value1=raw[1],
+            value2=raw[2],
+            checksum_ok=sum(raw) & 0xFF == p.CHECKSUM_TARGET,
+            label=p.describe_button_action(raw[0], raw[1], raw[2]),
+            raw=raw,
+        )
 
     def set_button(
         self,
@@ -678,14 +684,11 @@ class AtkMouse:
         record = bytes([cls & 0xFF, value1 & 0xFF, value2 & 0xFF])
         record += bytes([(p.CHECKSUM_TARGET - sum(record)) & 0xFF])
         address = p.Eeprom.KEYS + index * p.KEY_RECORD_LEN
+        # write_eeprom liest den Record zurueck und wirft WriteVerificationError
+        # bei Abweichung. Kein read_buttons() hier: das bricht bei einem leeren
+        # Slot davor ab und lieferte dann keinen Eintrag fuer diesen Slot.
         self.write_eeprom(address, record)
-        buttons = self.read_buttons(index + 1)
-        got = buttons[index]
-        if got.raw != record:
-            raise WriteVerificationError(
-                f"Tasten-Slot {slot}: geschrieben {record.hex(' ')}, zurueckgelesen {got.raw.hex(' ')}"
-            )
-        return got
+        return self._button_from_raw(index, address, record)
 
     def read_shortcut(self, slot: int) -> bytes:
         """32-Byte-Shortcut-Slot (0x0100 + slot*32) - roh, Format herstellerabhaengig."""

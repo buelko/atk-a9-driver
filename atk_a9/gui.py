@@ -14,7 +14,8 @@ from typing import Any, Callable
 
 from . import protocol as p
 from .device import AtkMouse, MouseStatus
-from .hidraw import DeviceNotFound
+from .device import WriteVerificationError
+from .hidraw import DeviceBusy, DeviceNotFound
 
 POLL_BATTERY_MS = 60_000
 
@@ -49,17 +50,36 @@ class Worker(threading.Thread):
     def run(self) -> None:
         while True:
             work, done, fail = self.jobs.get()
-            try:
-                if self.mouse is None:
-                    self.mouse = AtkMouse.connect()
-                done(work(self.mouse))
-            except (DeviceNotFound, PermissionError) as exc:
-                self._drop()
-                fail(str(exc))
-            except TimeoutError:
-                fail("Keine Antwort - Maus bewegen (Schlafmodus) und erneut versuchen.")
-            except (p.ProtocolError, ValueError, OSError) as exc:
-                fail(str(exc))
+            self.run_one(work, done, fail)
+
+    def run_one(
+        self,
+        work: Callable[[AtkMouse], Any],
+        done: Callable[[Any], None],
+        fail: Callable[[str], None],
+    ) -> None:
+        """Einen Auftrag ausfuehren. Darf nie eine Ausnahme durchlassen, sonst
+        stirbt der Thread und die Oberflaeche bleibt auf 'arbeite...' haengen."""
+        try:
+            if self.mouse is None:
+                self.mouse = AtkMouse.connect()
+            result = work(self.mouse)
+        except DeviceBusy as exc:
+            fail(str(exc))
+        except TimeoutError:
+            # Maus schlaeft: Verbindung ist in Ordnung und bleibt offen
+            fail("Keine Antwort - Maus bewegen (Schlafmodus) und erneut versuchen.")
+        except (p.ProtocolError, ValueError, WriteVerificationError) as exc:
+            fail(str(exc))
+        except (DeviceNotFound, OSError) as exc:
+            # Dongle abgezogen o. ae.: Handle verwerfen, naechster Auftrag verbindet neu
+            self._drop()
+            fail(str(exc))
+        except Exception as exc:  # noqa: BLE001 - Thread muss ueberleben
+            self._drop()
+            fail(f"Unerwarteter Fehler: {type(exc).__name__}: {exc}")
+        else:
+            done(result)
 
     def _drop(self) -> None:
         if self.mouse is not None:
