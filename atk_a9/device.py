@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Sequence
 
+from . import keys as k
 from . import protocol as p
 from .catalog import Model, find_model, polling_options, RECEIVER_MAX_POLLING
 from .hidraw import (
@@ -29,6 +30,12 @@ from .hidraw import (
     list_hidraw_nodes,
     list_input_nodes,
 )
+
+
+SENSOR_MODES: dict[int, str] = {0: "basic", 1: "competitive", 2: "max"}
+ANGLE_LIMIT = 30          # Grad; angenommene Grenze, die Firmware speichert ein vorzeichenbehaftetes Byte
+WHEEL_GUARD_MIN = 100     # ms, Bereich der Herstellersoftware
+WHEEL_GUARD_MAX = 1000
 
 
 class WriteVerificationError(RuntimeError):
@@ -98,7 +105,7 @@ class AdvancedRow:
 class SensorRow:
     sleep_enabled: bool | None
     sleep_time: int | None
-    performance_mode: str | None  # "basic" | "competitive"
+    performance_mode: str | None  # "basic" | "competitive" | "max"
     raw: bytes
 
 
@@ -168,6 +175,8 @@ class MouseStatus:
     # Auswahlmoeglichkeiten dieses Modells/Empfaengers (fuer Oberflaechen)
     polling_options: tuple[int, ...] = ()
     lod_options: tuple[float, ...] = ()
+    long_range: bool | None = None       # Reichweiten-Modus des Empfaengers
+    wheel_guard_ms: int | None = None    # Mausrad-Schutz: 0 = aus, None = nicht vorhanden
 
     def to_dict(self) -> dict[str, Any]:
         def clean(value: Any) -> Any:
@@ -660,13 +669,14 @@ class AtkMouse:
         return SensorRow(
             sleep_enabled=bool(p.unpair(row[0], row[1])) if p.unpair(row[0], row[1]) in (0, 1) else None,
             sleep_time=p.unpair(row[2], row[3]),
-            performance_mode={0: "basic", 1: "competitive"}.get(mode),
+            performance_mode=SENSOR_MODES.get(mode),
             raw=bytes(row),
         )
 
     def set_sensor_mode(self, mode: str) -> SensorRow:
-        """'basic' = Basic Mode, 'competitive' = ATK Shard Competitive Firmware."""
-        mapping = {"basic": 0, "base": 0, "competitive": 1, "shard": 1, "leistung": 1}
+        """'basic' = Basic Mode, 'competitive' = Wettkampf-Modus, 'max' =
+        Wettkampf-Modus Max (Hersteller: AthleticsMax; mehr Stromverbrauch)."""
+        mapping = {"basic": 0, "base": 0, "competitive": 1, "shard": 1, "leistung": 1, "max": 2}
         if mode not in mapping:
             raise ValueError(f"Sensor-Modus {mode!r} nicht in {sorted(mapping)}")
         self._update_pairs(p.Eeprom.SENSOR, p.SENSOR_LEN, {4: mapping[mode]})
@@ -682,6 +692,53 @@ class AtkMouse:
             angle -= 256
         return angle, bool(p.unpair(row[2], row[3]))
 
+    def set_angle(self, angle: int | None = None, snap: bool | None = None) -> tuple[float, bool]:
+        """Sensorwinkel in Grad (-30..30) und/oder Angle-Snapping setzen."""
+        updates: dict[int, int] = {}
+        if angle is not None:
+            if not -ANGLE_LIMIT <= angle <= ANGLE_LIMIT:
+                raise ValueError(f"Sensorwinkel {angle} ausserhalb -{ANGLE_LIMIT}..{ANGLE_LIMIT} Grad")
+            updates[0] = angle & 0xFF  # Zweierkomplement
+        if snap is not None:
+            updates[2] = int(snap)
+        if not updates:
+            raise ValueError("keine Aenderung angegeben")
+        with self.transport.locked():
+            row = self._read_row(p.Eeprom.SENSOR_ANGLE, 4)
+            if row == b"\xff" * 4:
+                raise ValueError("Dieses Modell speichert keinen Sensorwinkel")
+            self._update_pairs(p.Eeprom.SENSOR_ANGLE, 4, updates)
+            result = self.read_angle()
+        assert result is not None
+        return result
+
+    # -- Mausrad-Schutz (Systemzeile, Byte 6) --------------------------------
+
+    def read_wheel_guard(self) -> int | None:
+        """Mausrad-Schutz in ms (Hersteller: 'Scroll Wheel Anti-Mistouch').
+
+        Der erste Rad-Schritt wird ignoriert; gescrollt wird erst, wenn in der
+        eingestellten Zeit ein zweiter folgt. 0 = aus, None = nicht vorhanden.
+        """
+        row = self.read_eeprom(p.Eeprom.SYSTEM, p.SYSTEM_ROW_LEN)
+        if (row[6] + row[7]) & 0xFF != p.CHECKSUM_TARGET:
+            return None
+        return row[6] * 10
+
+    def set_wheel_guard(self, ms: int) -> int:
+        if ms != 0 and not (WHEEL_GUARD_MIN <= ms <= WHEEL_GUARD_MAX and ms % 10 == 0):
+            raise ValueError(
+                f"Mausrad-Schutz {ms} ms ungueltig: 0 (aus) oder {WHEEL_GUARD_MIN}..{WHEEL_GUARD_MAX} in 10er-Schritten"
+            )
+        with self.transport.locked():
+            if self.read_wheel_guard() is None:
+                raise ValueError("Dieses Modell hat keinen Mausrad-Schutz")
+            # wie die Herstellersoftware: die 10-Byte-Systemzeile am Stueck
+            self._update_pairs(p.Eeprom.SYSTEM, p.SYSTEM_ROW_LEN, {6: ms // 10})
+            result = self.read_wheel_guard()
+        assert result is not None
+        return result
+
     # -- Tasten (0x0060) ----------------------------------------------------
 
     def read_buttons(self, count: int = 8) -> list[ButtonAssignment]:
@@ -695,7 +752,14 @@ class AtkMouse:
             if raw == b"\x00" * 4:
                 # unprogrammierter Slot: Ende der Tastenmatrix
                 break
-            out.append(self._button_from_raw(index, address, raw))
+            button = self._button_from_raw(index, address, raw)
+            if button.cls == p.ButtonClass.SHORTCUT and index < k.SHORTCUT_SLOTS:
+                # die Tastenfolge steht im Shortcut-Slot dieser Taste
+                try:
+                    button.label = "Tastenkombination " + k.describe_combo(self.read_combo(index + 1))
+                except (p.ProtocolError, TimeoutError) as exc:
+                    self._note(f"Tastenkombination von Taste {index + 1} nicht lesbar: {exc}")
+            out.append(button)
         return out
 
     @staticmethod
@@ -741,6 +805,88 @@ class AtkMouse:
             self.write_eeprom(address, record)
         return self._button_from_raw(index, address, record)
 
+    def set_fire_key(self, slot: int, interval_ms: int, count: int = 0) -> ButtonAssignment:
+        """Schnellfeuer: Klicks im Abstand interval_ms; count 1..3 je Druck
+        oder 0 = Dauerfeuer, solange die Taste gehalten wird."""
+        if not k.FIRE_INTERVAL_MIN <= interval_ms <= k.FIRE_INTERVAL_MAX:
+            raise ValueError(f"Abstand {interval_ms} ms ausserhalb {k.FIRE_INTERVAL_MIN}..{k.FIRE_INTERVAL_MAX}")
+        if not 0 <= count <= k.FIRE_COUNT_MAX:
+            raise ValueError(f"Anzahl {count} ausserhalb 0..{k.FIRE_COUNT_MAX} (0 = Dauerfeuer)")
+        return self.set_button(slot, p.ButtonClass.FIREPOWER, interval_ms, count)
+
+    def set_macro_button(self, slot: int, macro: int, mode: int | str = "hold") -> ButtonAssignment:
+        """Taste mit Makro 1..12 belegen. mode: Anzahl 1..250, 'hold', 'toggle' oder 'anykey'."""
+        if not 1 <= macro <= k.MACRO_SLOTS:
+            raise ValueError(f"Makro {macro} ausserhalb 1..{k.MACRO_SLOTS}")
+        return self.set_button(slot, p.ButtonClass.MACRO, macro - 1, k.parse_macro_mode(mode))
+
+    # -- Tastenkombinationen (0x0100, ein Slot je Taste) ----------------------
+
+    @staticmethod
+    def _combo_address(slot: int) -> int:
+        if not 1 <= slot <= k.SHORTCUT_SLOTS:
+            raise ValueError(f"Tastenkombinationen gibt es nur fuer Taste 1..{k.SHORTCUT_SLOTS}")
+        return p.Eeprom.KEY_SHORTCUTS + (slot - 1) * p.SHORTCUT_SLOT_LEN
+
+    def read_combo(self, slot: int) -> list[k.KeyEvent]:
+        """Gespeicherte Tastenfolge der Taste (leer, wenn keine programmiert ist)."""
+        return k.decode_shortcut(self.read_eeprom(self._combo_address(slot), 20))
+
+    def set_combo(self, slot: int, events: list[k.KeyEvent] | str) -> ButtonAssignment:
+        """Taste mit einer Tastenkombination belegen, z. B. 'ctrl+shift+a'."""
+        if isinstance(events, str):
+            events = k.parse_combo(events)
+        address = self._combo_address(slot)
+        record = k.encode_shortcut(events)
+        # Rahmen wie beim Hersteller: 10 Byte ab Slot-Anfang, bei Bedarf weitere 10
+        record += bytes(-len(record) % p.MAX_DATA)
+        with self.transport.locked():
+            if self.read_eeprom(address, len(record)) != record:
+                self.write_eeprom(address, record)
+            button = self.set_button(slot, p.ButtonClass.SHORTCUT, 0, 0)
+        button.label = "Tastenkombination " + k.describe_combo(events)
+        return button
+
+    # -- Makros (0x0300, 12 Slots zu 384 Byte) ---------------------------------
+
+    @staticmethod
+    def _macro_address(macro: int) -> int:
+        if not 1 <= macro <= k.MACRO_SLOTS:
+            raise ValueError(f"Makro {macro} ausserhalb 1..{k.MACRO_SLOTS}")
+        return p.Eeprom.MACROS + (macro - 1) * p.MACRO_SLOT_LEN
+
+    def read_macro(self, macro: int) -> list[k.KeyEvent]:
+        address = self._macro_address(macro)
+        with self.transport.locked():
+            head = self.read_eeprom(address, k.MACRO_COUNT_OFFSET + 1)
+            count = k.macro_count(head)
+            if count == 0:
+                return []
+            body = self.read_eeprom(address + len(head), count * 5 + 1)
+        return k.decode_macro(head + body)
+
+    def _write_macro_slot(self, macro: int, data: bytes) -> None:
+        address = self._macro_address(macro)
+        # In 10-Byte-Rahmen ab Slot-Anfang (wie beim Hersteller), aber nie
+        # ueber das Slot-Ende hinaus in das naechste Makro.
+        data += bytes(min(-len(data) % p.MAX_DATA, p.MACRO_SLOT_LEN - len(data)))
+        with self.transport.locked():
+            if self.read_eeprom(address, len(data)) != data:
+                self.write_eeprom(address, data)
+
+    def write_macro(self, macro: int, events: list[k.KeyEvent] | str) -> list[k.KeyEvent]:
+        """Makro speichern. events als Liste oder Text (siehe keys.parse_macro)."""
+        if isinstance(events, str):
+            events = k.parse_macro(events)
+        if not events:
+            raise ValueError("leeres Makro - zum Loeschen clear_macro() verwenden")
+        self._write_macro_slot(macro, k.encode_macro(events))
+        return self.read_macro(macro)
+
+    def clear_macro(self, macro: int) -> None:
+        """Makro leeren: Kopf und Anzahl 0 (so setzt auch der Hersteller zurueck)."""
+        self._write_macro_slot(macro, k.MACRO_HEADER + b"\x00")
+
     def read_shortcut(self, slot: int) -> bytes:
         """32-Byte-Shortcut-Slot (0x0100 + slot*32) - roh, Format herstellerabhaengig."""
         index = slot - 1
@@ -769,6 +915,18 @@ class AtkMouse:
             self._note(f"Reichweiten-Modus nicht lesbar: {exc}")
             return None
         return self._single_value(response)
+
+    def set_far_distance(self, enabled: bool) -> bool:
+        """Reichweiten-Modus (Hersteller: 'Ultra Long Range') ein-/ausschalten."""
+        if bool(self.get_far_distance()) == bool(enabled):
+            return bool(enabled)
+        self.command(p.Cmd.SET_FAR_DISTANCE, data=bytes([int(enabled)]) + bytes(9))
+        got = self.get_far_distance()
+        if got is None or bool(got) != bool(enabled):
+            raise WriteVerificationError(
+                f"Reichweiten-Modus: gesetzt {int(enabled)}, zurueckgelesen {got}"
+            )
+        return bool(got)
 
     def get_dongle_light(self) -> int | None:
         try:
@@ -848,6 +1006,14 @@ class AtkMouse:
             except (TimeoutError, p.ProtocolError) as exc:
                 self._note(f"Winkel nicht lesbar: {exc}")
         buttons = self.read_buttons() if include_buttons else []
+        far: int | None = None
+        if self.model is None or self.model.supports("noFarDistance"):
+            far = self.get_far_distance()
+        wheel_guard: int | None = None
+        try:
+            wheel_guard = self.read_wheel_guard()
+        except (TimeoutError, p.ProtocolError) as exc:
+            self._note(f"Mausrad-Schutz nicht lesbar: {exc}")
         lo, hi, family = self.dpi_limits()
         return MouseStatus(
             node=self.node.path,
@@ -871,6 +1037,8 @@ class AtkMouse:
             max_polling_hz=self.max_polling_hz(),
             notes=list(self.notes),
             polling_options=tuple(self.polling_options()),
+            long_range=None if far is None else bool(far),
+            wheel_guard_ms=wheel_guard,
             lod_options=tuple(sorted(set(self.lod_table().codes.values()))),
         )
 

@@ -14,6 +14,17 @@ Beispiele:
   atk-a9 lod set 1.0               Lift-off setzen (mm oder code:N)
   atk-a9 buttons                   Tastenbelegung anzeigen
   atk-a9 buttons set 5 mouse back  Slot 5 -> "Zurueck"
+  atk-a9 fire 5 --interval 40      Taste 5: Schnellfeuer (Dauerfeuer beim Halten)
+  atk-a9 fire 5 --interval 40 --count 3
+  atk-a9 combo 4 ctrl+shift+a      Taste 4: Tastenkombination
+  atk-a9 macro                     Makros auflisten
+  atk-a9 macro set 3 "+ctrl c 50ms -ctrl"
+  atk-a9 macro assign 4 3 --mode hold   Taste 4 fuehrt Makro 3 aus
+  atk-a9 macro clear 3
+  atk-a9 angle set -5 --snap aus   Sensorwinkel / Angle-Snapping
+  atk-a9 longrange an              Reichweiten-Modus
+  atk-a9 wheel-guard 200           Mausrad-Schutz (ms, 0 = aus)
+  atk-a9 pair start                Maus neu mit dem Dongle koppeln
   atk-a9 advanced                  Debounce/MotionSync/Schlaf usw.
   atk-a9 advanced set --debounce 4 --sleep 300
   atk-a9 probe                     Diagnose (Interfaces, Reports, Input-Nodes)
@@ -25,6 +36,7 @@ import argparse
 import json
 import sys
 
+from . import keys as k
 from . import protocol as p
 from .device import AtkMouse, MouseOffline, WriteVerificationError
 from .hidraw import DeviceBusy, DeviceNotFound, list_hidraw_nodes, list_input_nodes
@@ -92,6 +104,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Sensormodus  : {status.sensor_row.performance_mode}")
     if status.angle:
         print(f"Winkel       : {status.angle[0]} Grad, Angle-Snap {_onoff(status.angle[1])}")
+    if status.long_range is not None:
+        print(f"Reichweite   : Reichweiten-Modus {_onoff(status.long_range)}")
+    if status.wheel_guard_ms is not None:
+        print(f"Mausrad      : Schutz {str(status.wheel_guard_ms) + ' ms' if status.wheel_guard_ms else 'aus'}")
     for button in status.buttons:
         print(f"  Taste {button.slot}: {button.describe()}")
     for note in status.notes:
@@ -244,7 +260,114 @@ def cmd_sensor(args: argparse.Namespace) -> int:
             row = mouse.set_sensor_mode(args.mode)
         else:
             row = mouse.read_sensor_row()
-        print(f"Sensormodus: {row.performance_mode} (basic|competitive)")
+        print(f"Sensormodus: {row.performance_mode} (basic|competitive|max)")
+    return 0
+
+
+def cmd_fire(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        record = mouse.set_fire_key(args.slot, args.interval, args.count)
+    print(f"Taste {record.slot}: {record.describe()}")
+    return 0
+
+
+def cmd_combo(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        if args.keys:
+            record = mouse.set_combo(args.slot, args.keys)
+            print(f"Taste {record.slot}: {record.describe()}")
+        else:
+            events = mouse.read_combo(args.slot)
+            print(f"Taste {args.slot}: {k.describe_combo(events) if events else 'keine Tastenkombination gespeichert'}")
+    return 0
+
+
+def cmd_macro(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        action = args.macro_action
+        if action == "set":
+            events = mouse.write_macro(args.macro, args.text)
+            print(f"Makro {args.macro}: {k.format_macro(events)}")
+        elif action == "clear":
+            mouse.clear_macro(args.macro)
+            print(f"Makro {args.macro} geleert")
+        elif action == "assign":
+            if not mouse.read_macro(args.macro):
+                return _fail(f"Makro {args.macro} ist leer - zuerst mit 'macro set' anlegen")
+            record = mouse.set_macro_button(args.slot, args.macro, args.mode)
+            print(f"Taste {record.slot}: {record.describe()}")
+        elif action == "show":
+            events = mouse.read_macro(args.macro)
+            print(k.format_macro(events) if events else "(leer)")
+        else:
+            for number in range(1, k.MACRO_SLOTS + 1):
+                events = mouse.read_macro(number)
+                print(f"Makro {number:>2}: {k.format_macro(events) if events else '(leer)'}")
+    return 0
+
+
+def cmd_angle(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        if args.angle_action == "set":
+            if args.degrees is None and args.snap is None:
+                return _fail("Winkel und/oder --snap angeben")
+            result = mouse.set_angle(args.degrees, _tristate(args.snap))
+        else:
+            result = mouse.read_angle()
+    if result is None:
+        return _fail("Dieses Modell speichert keinen Sensorwinkel")
+    print(f"Sensorwinkel: {result[0]} Grad, Angle-Snap {_onoff(result[1])}")
+    return 0
+
+
+def cmd_longrange(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        if args.state is not None:
+            state: bool | None = mouse.set_far_distance(bool(_tristate(args.state)))
+        else:
+            value = mouse.get_far_distance()
+            state = None if value is None else bool(value)
+    print(f"Reichweiten-Modus: {_onoff(state)}")
+    return 0
+
+
+def cmd_wheel_guard(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        value = mouse.set_wheel_guard(args.ms) if args.ms is not None else mouse.read_wheel_guard()
+    if value is None:
+        return _fail("Dieses Modell hat keinen Mausrad-Schutz")
+    print(f"Mausrad-Schutz: {str(value) + ' ms' if value else 'aus'}")
+    return 0
+
+
+def cmd_pair(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        if args.pair_action == "start":
+            mouse.start_pairing()
+            print("Kopplung gestartet. Jetzt an der Maus Links-, Mittel- und Rechtsklick")
+            print("gleichzeitig halten, bis die LED blinkt. Danach: atk-a9 pair status")
+        elif args.pair_action == "cancel":
+            mouse.cancel_pairing()
+            print("Kopplung abgebrochen")
+        pairing = mouse.pairing_status()
+        online = mouse.online_status()
+    if pairing:
+        print(f"Kopplungs-Status {pairing['status']}, Restzeit {pairing['seconds_remaining']} s")
+    if online:
+        print(f"Maus verbunden: {_onoff(online['online'])} (RF-Kennung {online['rf_id']})")
+    return 0
+
+
+def cmd_factory_reset(args: argparse.Namespace) -> int:
+    if not args.yes:
+        return _fail(
+            "Setzt ALLE Einstellungen der Maus auf Werkszustand (DPI, Tasten, Makros).\n"
+            "Danach kann eine neue Kopplung noetig sein (atk-a9 pair start).\n"
+            "Zum Ausfuehren: atk-a9 factory-reset --yes"
+        )
+    with _connect(args) as mouse:
+        mouse.factory_reset()
+    print("Werkseinstellungen wiederhergestellt.")
     return 0
 
 
@@ -342,11 +465,68 @@ def build_parser() -> argparse.ArgumentParser:
     aset.add_argument("--ripple", help="an|aus (Ripple-Korrektur)")
     s.set_defaults(func=cmd_advanced)
 
-    s = sub.add_parser("sensor", help="Sensormodus (basic/competitive)")
+    s = sub.add_parser("sensor", help="Sensormodus (basic/competitive/max)")
     ssub = s.add_subparsers(dest="sensor_action")
     sset = ssub.add_parser("set")
-    sset.add_argument("mode", choices=("basic", "competitive"))
+    sset.add_argument("mode", choices=("basic", "competitive", "max"))
     s.set_defaults(func=cmd_sensor)
+
+    s = sub.add_parser("fire", help="Taste mit Schnellfeuer belegen")
+    s.add_argument("slot", type=int, help="Taste 1..16")
+    s.add_argument("--interval", type=int, default=50,
+                   help=f"Abstand der Klicks in ms ({k.FIRE_INTERVAL_MIN}..{k.FIRE_INTERVAL_MAX}, Standard 50)")
+    s.add_argument("--count", type=int, default=0,
+                   help=f"Klicks je Druck 1..{k.FIRE_COUNT_MAX}; 0 = Dauerfeuer beim Halten (Standard)")
+    s.set_defaults(func=cmd_fire)
+
+    s = sub.add_parser("combo", help="Tastenkombination einer Taste anzeigen/setzen")
+    s.add_argument("slot", type=int, help=f"Taste 1..{k.SHORTCUT_SLOTS}")
+    s.add_argument("keys", nargs="?", help="z. B. ctrl+shift+a (hoechstens 2 Modifier + 1 Taste)")
+    s.set_defaults(func=cmd_combo)
+
+    s = sub.add_parser(
+        "macro",
+        help="Makros anzeigen/bearbeiten",
+        description="Makro-Text: 'a' tippt eine Taste, '+ctrl'/'-ctrl' drueckt/loest, 'click:left', "
+        "'+mouse:left', 'wheel:up', '50ms' = Pause nach dem vorigen Ereignis (Standard 10 ms).",
+    )
+    msub = s.add_subparsers(dest="macro_action")
+    mshow = msub.add_parser("show", help="ein Makro anzeigen")
+    mshow.add_argument("macro", type=int)
+    mset = msub.add_parser("set", help='macro set <nr> "<text>"')
+    mset.add_argument("macro", type=int, help=f"Makro 1..{k.MACRO_SLOTS}")
+    mset.add_argument("text")
+    mclr = msub.add_parser("clear", help="Makro leeren")
+    mclr.add_argument("macro", type=int)
+    masg = msub.add_parser("assign", help="macro assign <taste> <nr> [--mode ...]")
+    masg.add_argument("slot", type=int, help="Taste 1..16")
+    masg.add_argument("macro", type=int)
+    masg.add_argument("--mode", default="hold",
+                      help="hold (solange gehalten, Standard) | toggle | anykey | Anzahl 1..250")
+    s.set_defaults(func=cmd_macro)
+
+    s = sub.add_parser("angle", help="Sensorwinkel und Angle-Snapping")
+    gsub = s.add_subparsers(dest="angle_action")
+    gset = gsub.add_parser("set", help="angle set [grad] [--snap an|aus]")
+    gset.add_argument("degrees", type=int, nargs="?", help="-30..30")
+    gset.add_argument("--snap", help="an|aus")
+    s.set_defaults(func=cmd_angle)
+
+    s = sub.add_parser("longrange", help="Reichweiten-Modus anzeigen/setzen")
+    s.add_argument("state", nargs="?", help="an|aus")
+    s.set_defaults(func=cmd_longrange)
+
+    s = sub.add_parser("wheel-guard", help="Mausrad-Schutz gegen versehentliches Scrollen")
+    s.add_argument("ms", type=int, nargs="?", help="0 = aus, sonst 100..1000 in 10er-Schritten")
+    s.set_defaults(func=cmd_wheel_guard)
+
+    s = sub.add_parser("pair", help="Kopplung Maus <-> Dongle")
+    s.add_argument("pair_action", nargs="?", choices=("status", "start", "cancel"), default="status")
+    s.set_defaults(func=cmd_pair)
+
+    s = sub.add_parser("factory-reset", help="Werkseinstellungen (nur mit --yes)")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(func=cmd_factory_reset)
 
     sub.add_parser("probe", help="Diagnose").set_defaults(func=cmd_probe)
 

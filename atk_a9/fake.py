@@ -30,6 +30,7 @@ class FakeAtkDevice:
         # True: Maus schlaeft - nur der Dongle antwortet noch (0x03 Online-Status)
         self.asleep = False
         self.profile = 0
+        self.far_distance = 0
         self.cid_mid = cid_mid
         self.firmware = firmware
         self.battery = [100, 0]
@@ -113,6 +114,20 @@ class FakeAtkDevice:
                 [(p.CHECKSUM_TARGET - sum(record)) & 0xFF]
             )
 
+        # Tastenkombinationen und Makros: Inhalt wie aus einer echten A9 Ultra
+        # ausgelesen (von der Herstellersoftware geschrieben).
+        self.eeprom[0x0100:0x1B00] = b"\xff" * (0x1B00 - 0x0100)
+        self.eeprom[0x0100:0x010A] = bytes.fromhex("02 81 5a 00 41 5a 00 dd 00 00")  # Taste 1: Ziffernblock 2
+        self.eeprom[0x0160:0x016A] = bytes.fromhex("02 81 1e 00 41 1e 00 55 00 00")  # Taste 4: Taste 1
+        self.eeprom[0x0180:0x018A] = bytes.fromhex("02 81 1e 00 41 1e 00 55 00 00")  # Taste 5: Taste 1
+        header = bytes([0x08] + [0x02] * 8 + [0xFF] * 22)
+        for slot in range(12):
+            base = 0x0300 + slot * 384
+            self.eeprom[base : base + 40] = header + bytes(9)
+        # der Hersteller schreibt 10-Byte-Rahmen: der Rest des letzten Rahmens ist 0
+        self.eeprom[0x0300 + 31 : 0x0300 + 50] = bytes.fromhex("02 81 1e 00 00 0f 41 1e 00 00 05 41") + bytes(7)
+        self.eeprom[0x0480 + 31 : 0x0480 + 50] = bytes.fromhex("02 81 1e 00 00 1f 41 1e 00 00 01 35") + bytes(7)
+
     def _put_pairs(self, address: int, values: list[int]) -> None:
         for index, value in enumerate(values):
             self.eeprom[address + index * 2 : address + index * 2 + 2] = p.pair(value)
@@ -134,7 +149,10 @@ class FakeAtkDevice:
         if cmd == p.Cmd.GET_CURRENT_CONFIG:
             return p.Frame(cmd=cmd, data=bytes([self.profile]), declared=1)
         if cmd == p.Cmd.GET_FAR_DISTANCE:
-            return p.Frame(cmd=cmd, data=bytes(10), declared=10)
+            return p.Frame(cmd=cmd, data=bytes([self.far_distance]) + bytes(9), declared=10)
+        if cmd == p.Cmd.SET_FAR_DISTANCE:
+            self.far_distance = request.data[0] if request.data else 0
+            return p.Frame(cmd=cmd, data=request.data, declared=len(request.data))
         if cmd in (p.Cmd.GET_EEPROM, p.Cmd.SET_EEPROM):
             return self._eeprom(request)
         return p.Frame(cmd=cmd, status=0x01)

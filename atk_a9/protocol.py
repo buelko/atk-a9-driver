@@ -498,6 +498,7 @@ class ButtonClass(IntEnum):
     PROFILE = 0x09
     DPI_LOCK = 0x0A
     WHEEL = 0x0B
+    TURN_AROUND = 0x0C
 
 
 BUTTON_CLASS_LABELS: dict[int, str] = {
@@ -505,9 +506,9 @@ BUTTON_CLASS_LABELS: dict[int, str] = {
     ButtonClass.MOUSE: "Maustaste",
     ButtonClass.DPI: "DPI-Steuerung",
     ButtonClass.HORIZONTAL_SCROLL: "horizontal scrollen",
-    ButtonClass.FIREPOWER: "Fire-Key",
-    ButtonClass.SHORTCUT: "Tastenkuerzel (Shortcut-Slot)",
-    ButtonClass.MACRO: "Makro (Makro-Slot)",
+    ButtonClass.FIREPOWER: "Schnellfeuer",
+    ButtonClass.SHORTCUT: "Tastenkombination",
+    ButtonClass.MACRO: "Makro",
     ButtonClass.REPORT_RATE: "Polling-Rate umschalten",
     ButtonClass.LIGHTING: "Beleuchtung",
     ButtonClass.PROFILE: "Profil umschalten",
@@ -560,9 +561,21 @@ def describe_button_action(cls: int, value1: int, value2: int) -> str:
         return "horizontal " + SCROLL_ACTION_LABELS.get(value1, f"0x{value1:02x}")
     if cls == ButtonClass.WHEEL:
         return WHEEL_ACTION_LABELS.get(value1, f"Mausrad 0x{value1:02x}")
-    if cls in (ButtonClass.SHORTCUT, ButtonClass.MACRO):
-        label = BUTTON_CLASS_LABELS[cls]
-        return f"{label} #{value1} (Parameter 0x{value2:02x})"
+    if cls == ButtonClass.FIREPOWER:
+        # wert1 = Abstand in ms, wert2 = Anzahl (0 = solange gehalten)
+        count = "Dauerfeuer" if value2 == 0 else f"{value2}x"
+        return f"Schnellfeuer alle {value1} ms, {count}"
+    if cls == ButtonClass.SHORTCUT:
+        # die Tastenfolge liegt im Shortcut-Slot der Taste (0x0100 + taste * 32)
+        return "Tastenkombination"
+    if cls == ButtonClass.MACRO:
+        from .keys import describe_macro_mode
+
+        return f"Makro {value1 + 1}, {describe_macro_mode(value2)}"
+    if cls == ButtonClass.REPORT_RATE and not value1 and not value2:
+        return "Polling-Rate umschalten"
+    if cls == ButtonClass.TURN_AROUND:
+        return "180-Grad-Drehung"
     base = BUTTON_CLASS_LABELS.get(cls, f"unbekannte Klasse 0x{cls:02x}")
     return f"{base} (wert1=0x{value1:02x}, wert2=0x{value2:02x})"
 
