@@ -14,13 +14,11 @@ Quellen der Feld-Bedeutungen (Verifikation durch Auslesen echter Geraete):
 
 from __future__ import annotations
 
-import json
-import time
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Sequence
 
 from . import protocol as p
-from .catalog import Model, find_model, generic_model, polling_options, RECEIVER_MAX_POLLING
+from .catalog import Model, find_model, polling_options, RECEIVER_MAX_POLLING
 from .hidraw import (
     DeviceBusy,
     DeviceNotFound,
@@ -289,9 +287,6 @@ class AtkMouse:
                     "Maus bewegen oder klicken und erneut versuchen."
                 ) from exc
             raise
-        if self.verbose:
-            print(f"  -> {frame.build().hex(' ')}")
-            print(f"  <- {response.hex()}")
         return response
 
     def command(
@@ -434,7 +429,14 @@ class AtkMouse:
 
     def _update_pairs(self, address: int, length: int, updates: dict[int, int]) -> None:
         """Lesen-Aendern-Schreiben unter einer Sperre, damit kein anderer
-        Prozess (Tray, GUI, CLI) dazwischen dieselbe Zeile veraendert."""
+        Prozess (Tray, GUI, CLI) dazwischen dieselbe Zeile veraendert.
+
+        Bewusst wird die ganze Zeile zurueckgeschrieben und nicht nur das
+        geaenderte Paar: so machen es die Referenztreiber, und ob die Firmware
+        Teil-Schreibvorgaenge einer Zeile uebernimmt, ist nicht belegt. Rest-
+        risiko: eine Aenderung an der Maus selbst (z. B. DPI-Taste) in den
+        wenigen Millisekunden zwischen Lesen und Schreiben wird ueberschrieben.
+        """
         with self.transport.locked():
             row = self._read_row(address, length)
             wanted = bytearray(row)
@@ -753,13 +755,25 @@ class AtkMouse:
 
     # -- Empfaenger-Kommandos ----------------------------------------------
 
+    @staticmethod
+    def _single_value(response: p.Frame) -> int | None:
+        """Einzelwert einer Antwort (erstes Datenbyte).
+
+        Je nach Kommando kommt er roh oder als Wertepaar - der Wert steht in
+        beiden Faellen vorn. Kein unpair(): an der A9 Ultra liefern 0x0E
+        (Laenge 1) und 0x17 (Laenge 10, Nullen) keine gueltigen Paare.
+        """
+        if not response.declared or not response.raw_data:
+            return None
+        return response.raw_data[0]
+
     def get_far_distance(self) -> int | None:
         try:
             response = self.command(p.Cmd.GET_FAR_DISTANCE, expect=p.Cmd.GET_FAR_DISTANCE)
         except (TimeoutError, p.ProtocolError) as exc:
             self._note(f"Reichweiten-Modus nicht lesbar: {exc}")
             return None
-        return p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
+        return self._single_value(response)
 
     def get_dongle_light(self) -> int | None:
         try:
@@ -767,7 +781,7 @@ class AtkMouse:
         except (TimeoutError, p.ProtocolError) as exc:
             self._note(f"Dongle-LED nicht lesbar: {exc}")
             return None
-        return p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
+        return self._single_value(response)
 
     def active_profile(self) -> int | None:
         try:
@@ -775,10 +789,16 @@ class AtkMouse:
         except (TimeoutError, p.ProtocolError) as exc:
             self._note(f"Aktives Profil nicht lesbar: {exc}")
             return None
-        value = p.unpair(response.raw_data[0], response.raw_data[1]) if len(response.raw_data) >= 2 else None
+        value = self._single_value(response)
         return value + 1 if value is not None and value < 8 else value
 
     def set_active_profile(self, profile: int) -> None:
+        """Profil umschalten (Kommando 0x0F) - an der ATK A9 Ultra NICHT nutzbar.
+
+        Hardware-Test (Firmware 3.0, Profil unveraendert auf 1 gesetzt): das
+        rohe Byte blieb unbeantwortet, das Wertepaar wurde mit Status 1
+        abgelehnt. Die Funktion meldet das als TimeoutError/ProtocolError.
+        """
         index = profile - 1
         if index < 0 or index > 3:
             raise ValueError("ATK HUB verwaltet 4 Profile (1..4)")

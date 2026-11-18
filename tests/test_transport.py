@@ -253,6 +253,22 @@ class DeviceDetailTests(unittest.TestCase):
         mouse, _ = self._mouse(firmware=(0x1A, 0x0F))
         self.assertEqual(mouse.firmware_version(), "1a.0f")
 
+    def test_single_value_replies_are_not_pairs(self):
+        """An der A9 Ultra beobachtet: 0x0E liefert ein rohes Byte, 0x17 zehn
+        Nullbytes. Frueher scheiterte beides an der Paar-Pruefsumme."""
+        mouse, fake = self._mouse()
+        self.assertEqual(mouse.active_profile(), 1)
+        fake.profile = 2
+        self.assertEqual(mouse.active_profile(), 3)
+        self.assertEqual(mouse.get_far_distance(), 0)
+        self.assertIsNone(mouse.get_dongle_light())  # Status 1 -> Hinweis statt Absturz
+        self.assertTrue(any("Dongle-LED" in note for note in mouse.notes))
+
+    def test_set_profile_reports_rejection(self):
+        mouse, _ = self._mouse()
+        with self.assertRaises(p.ProtocolError):
+            mouse.set_active_profile(1)
+
     def test_connect_closes_handle_on_failure(self):
         transport = mock.Mock()
         with mock.patch("atk_a9.device.find_config_node", return_value=node()), \

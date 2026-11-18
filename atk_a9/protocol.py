@@ -23,9 +23,8 @@ Hardware-Verifikation uebernommen (siehe docs/PROTOCOL.md).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import IntEnum
-from typing import Iterable, Sequence
 
 REPORT_ID = 0x08
 PAYLOAD_LEN = 16
@@ -651,7 +650,6 @@ def parse_battery(data: bytes, declared: "int | None" = None) -> Battery:
     """
     if declared is not None:
         data = data[:declared]
-    battery = Battery(raw=data)
     battery = Battery(raw=data)
     if len(data) >= 1:
         percent = data[0]

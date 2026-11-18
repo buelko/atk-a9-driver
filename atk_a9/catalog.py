@@ -12,7 +12,7 @@ CID/MID-Abfrage (Kommando 0x10).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from .protocol import DpiCodec, LodTable, PAW3950_LOD, STEP_LOD, ULTRA_LOD, make_dpi_codec
 

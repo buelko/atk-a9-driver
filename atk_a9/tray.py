@@ -28,7 +28,17 @@ RETRY_SECONDS = 30
 ICON_SIZE = 22
 LOW_BATTERY = 15       # Warnung bei <= 15 %
 LOW_BATTERY_RESET = 20  # erst ab >= 20 % (oder beim Laden) wieder scharf
-GUI_BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "atk-a9-gui")
+PACKAGE_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Die GUI als Modul starten: funktioniert aus dem Quellbaum (bin/-Skripte)
+# genauso wie nach einer Paket-Installation.
+GUI_CMD = [sys.executable, "-m", "atk_a9.gui"]
+
+
+def gui_env() -> dict[str, str]:
+    env = dict(os.environ)
+    paths = [PACKAGE_PARENT] + [x for x in env.get("PYTHONPATH", "").split(os.pathsep) if x]
+    env["PYTHONPATH"] = os.pathsep.join(paths)
+    return env
 
 
 def low_battery_step(percent: int | None, charging: bool, warned: bool) -> tuple[bool, bool]:
@@ -237,7 +247,7 @@ class TrayApp:
         # beendete Kindprozesse abholen, sonst bleiben Zombies zurueck
         self._children = [child for child in self._children if child.poll() is None]
         try:
-            self._children.append(subprocess.Popen([GUI_BIN]))
+            self._children.append(subprocess.Popen(GUI_CMD, env=gui_env()))
         except OSError as exc:
             notify("ATK A9 Ultra", f"Einstellungen lassen sich nicht starten: {exc}")
 

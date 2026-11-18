@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "atk-a9-driver"
+version = "0.2.0"
+description = "Linux-Userspace-Treiber fuer ATK/VXE-Maeuse (ATK A9 Ultra) ueber hidraw: CLI, GUI und Tray"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # Treiber und CLI brauchen nur die Standardbibliothek
+
+[project.optional-dependencies]
+# GUI: Tkinter (Distributionspaket python3-tk). Tray: GTK 3 ueber PyGObject.
+tray = ["PyGObject", "pycairo"]
+
+[project.scripts]
+atk-a9 = "atk_a9.cli:main"
+
+[project.gui-scripts]
+atk-a9-gui = "atk_a9.gui:main"
+atk-a9-tray = "atk_a9.tray:main"
+
+[tool.setuptools]
+packages = ["atk_a9"]

@@ -19,24 +19,15 @@ import glob
 import os
 import re
 import select
-import struct
 import time
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator, Sequence
+from typing import Iterable, Iterator
 
-from .protocol import FRAME_LEN, REPORT_ID, Cmd, Frame, ProtocolError
+from .protocol import FRAME_LEN, REPORT_ID, Frame, ProtocolError
 
 # ---------------------------------------------------------------------------
 # ioctls
 # ---------------------------------------------------------------------------
-
-_IOC_NRBITS = 8
-_IOC_TYPEBITS = 8
-_IOC_SIZEBITS = 14
-_IOC_DIRBITS = 2
-_IOC_NRMASK = (1 << _IOC_NRBITS) - 1
-_IOC_SIZEMASK = (1 << _IOC_SIZEBITS) - 1
-
 
 def _ioc(direction: int, typ: int, nr: int, size: int) -> int:
     return (
@@ -52,12 +43,6 @@ IOC_WRITE = 2
 
 HIDIOCGFEATURE = lambda size: _ioc(IOC_READ | IOC_WRITE, ord("H"), 0x2B, size)  # noqa: E731
 HIDIOCSFEATURE = lambda size: _ioc(IOC_WRITE, ord("H"), 0x2C, size)  # noqa: E731
-HIDIOCGREPORT = lambda size: _ioc(IOC_READ | IOC_WRITE, ord("H"), 0x27, size)  # noqa: E731
-HIDIOCSREPORT = lambda size: _ioc(IOC_WRITE, ord("H"), 0x28, size)  # noqa: E731
-
-EVIOCGBIT_BASE = 0x20  # EVIOCGBIT(ev, len) = _IOC(_IOC_READ, 'E', 0x20 + ev, len)
-EVIOCGRAB = _ioc(IOC_WRITE, ord("E"), 0x64, 4)
-EVIOCGNAME = lambda size: _ioc(IOC_READ, ord("E"), 0x06, size)  # noqa: E731
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +66,6 @@ TAG_USAGE = 0x08          # Local
 TAG_USAGE_MIN = 0x18      # Local
 TAG_USAGE_MAX = 0x28      # Local
 COLLECTION_APPLICATION = 0x01
-COLLECTION_PHYSICAL = 0x00
-COLLECTION_REPORT = 0x02
-COLLECTION_NAMED = 0x03
 
 
 @dataclass
@@ -301,26 +283,6 @@ EV_NAMES: dict[int, str] = {
     9: "FF",
 }
 
-BTN_NAMES: dict[int, str] = {
-    0x110: "BTN_LEFT",
-    0x111: "BTN_RIGHT",
-    0x112: "BTN_MIDDLE",
-    0x113: "BTN_SIDE",
-    0x114: "BTN_EXTRA",
-    0x115: "BTN_FORWARD",
-    0x116: "BTN_BACK",
-    0x117: "BTN_TASK",
-}
-
-REL_NAMES: dict[int, str] = {
-    0: "REL_X",
-    1: "REL_Y",
-    6: "REL_WHEEL",
-    8: "REL_HWHEEL",
-    11: "REL_WHEEL_HI_RES",
-    12: "REL_HWHEEL_HI_RES",
-}
-
 
 def parse_uevent_bitmask(text: str) -> set[int]:
     """Kernel-Format: Woerter von hoch nach niedrig, ohne fuehrende Nullen.
@@ -534,7 +496,7 @@ class HidrawTransport:
             if exc.errno == errno.ENOSYS:
                 raise ProtocolError(
                     "Geraet akzeptiert keine Output-Reports ueber hidraw "
-                    "(kein OUT-Endpoint). Bitte --backend usb verwenden."
+                    "(kein OUT-Endpoint) - dieses Interface ist nicht konfigurierbar."
                 ) from exc
             raise
 

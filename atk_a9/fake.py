@@ -29,6 +29,7 @@ class FakeAtkDevice:
         self.lock_depth = 0
         # True: Maus schlaeft - nur der Dongle antwortet noch (0x03 Online-Status)
         self.asleep = False
+        self.profile = 0
         self.cid_mid = cid_mid
         self.firmware = firmware
         self.battery = [100, 0]
@@ -128,6 +129,12 @@ class FakeAtkDevice:
             return p.Frame(cmd=cmd, data=bytes(self.battery), declared=len(self.battery))
         if cmd == p.Cmd.GET_ONLINE:
             return p.Frame(cmd=cmd, data=bytes([0 if self.asleep else 1, 0xAB, 0xCD, 0xEF]), declared=1)
+        # Antwortformen wie an der A9 Ultra beobachtet: Profil roh (Laenge 1),
+        # Reichweiten-Modus als 10 Nullbytes - beides keine Wertepaare.
+        if cmd == p.Cmd.GET_CURRENT_CONFIG:
+            return p.Frame(cmd=cmd, data=bytes([self.profile]), declared=1)
+        if cmd == p.Cmd.GET_FAR_DISTANCE:
+            return p.Frame(cmd=cmd, data=bytes(10), declared=10)
         if cmd in (p.Cmd.GET_EEPROM, p.Cmd.SET_EEPROM):
             return self._eeprom(request)
         return p.Frame(cmd=cmd, status=0x01)
