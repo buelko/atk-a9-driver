@@ -2,7 +2,7 @@
 Type=Application
 Name=ATK A9 Ultra
 Comment=Maus-Einstellungen: DPI, Polling, Tasten, Batterie
-Exec=/home/hmx/AI-Projekte/atk-a9-driver/bin/atk-a9-gui
+Exec=/usr/local/bin/atk-a9-gui
 Icon=input-mouse
 Terminal=false
 Categories=Settings;HardwareSettings;

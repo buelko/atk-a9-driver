@@ -203,11 +203,6 @@ class AtkMouse:
         self.verbose = verbose
         self.cid_mid: str | None = None
         self.notes: list[str] = []
-        # Die Systemzeile ist je nach Modellfamilie 6 oder 10 Byte lang.
-        # Es wird immer genau so viel zurueckgeschrieben, wie gelesen wurde
-        # (Odin-/OpenMouse-Verhalten auf echter Hardware).
-        self.system_len = p.SYSTEM_LEN
-        self.force_system_len: int | None = None
 
     # -- Verbindung ---------------------------------------------------------
 
@@ -243,7 +238,6 @@ class AtkMouse:
                     mouse.identify()
                 except (TimeoutError, p.ProtocolError) as exc:
                     mouse._note(f"CID/MID nicht lesbar: {exc}")
-            mouse.system_len = mouse.system_row_length()
         except BaseException:
             transport.close()  # kein offener Handle bei fehlgeschlagenem Verbinden
             raise
@@ -454,8 +448,9 @@ class AtkMouse:
         return "R1" in name or self.node.vendor == p.ATK_ALT_VID
 
     def system_row_length(self) -> int:
-        if self.force_system_len:
-            return self.force_system_len
+        """Die Systemzeile ist je nach Modellfamilie 6 oder 10 Byte lang. Es
+        wird immer genau so viel zurueckgeschrieben, wie gelesen wurde
+        (Odin-/OpenMouse-Verhalten auf echter Hardware)."""
         return p.SYSTEM_ROW_LEN if self.is_r1_family() else p.SYSTEM_LEN
 
     def read_system(self) -> SystemRow:
@@ -856,7 +851,7 @@ class AtkMouse:
         lo, hi, family = self.dpi_limits()
         return MouseStatus(
             node=self.node.path,
-            usb=self.node.device_string,
+            usb=self.node.vidpid,
             hid_name=self.node.name,
             cid_mid=self.cid_mid,
             model_name=self.model.name if self.model else "unbekannt",

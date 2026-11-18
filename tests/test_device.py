@@ -35,7 +35,6 @@ def connect(product: int = 0x101A) -> AtkMouse:
     transport = FakeAtkDevice()
     mouse = AtkMouse(transport, fake_node(product))
     mouse.identify()
-    mouse.system_len = mouse.system_row_length()
     return mouse
 
 
@@ -45,7 +44,7 @@ class IdentificationTests(unittest.TestCase):
         self.assertEqual(mouse.cid_mid, "2,87")
         assert mouse.model
         self.assertEqual(mouse.model.name, "ATK A9 Ultra")
-        self.assertEqual(mouse.system_len, p.SYSTEM_LEN)
+        self.assertEqual(mouse.system_row_length(), p.SYSTEM_LEN)
 
     def test_firmware_and_battery(self):
         mouse = connect()

@@ -42,7 +42,6 @@ IOC_READ = 1
 IOC_WRITE = 2
 
 HIDIOCGFEATURE = lambda size: _ioc(IOC_READ | IOC_WRITE, ord("H"), 0x2B, size)  # noqa: E731
-HIDIOCSFEATURE = lambda size: _ioc(IOC_WRITE, ord("H"), 0x2C, size)  # noqa: E731
 
 
 # ---------------------------------------------------------------------------
@@ -101,10 +100,6 @@ class ReportInfo:
         if sizes is None or sizes.output == 0:
             return False
         return size is None or sizes.output == size
-
-    def has_feature_report(self, report_id: int) -> bool:
-        sizes = self.reports.get(report_id)
-        return sizes is not None and sizes.feature > 0
 
     def feature_size(self, report_id: int) -> int:
         sizes = self.reports.get(report_id)
@@ -220,10 +215,6 @@ class HidrawNode:
         return f"{self.vendor:04x}:{self.product:04x}"
 
     @property
-    def device_string(self) -> str:
-        return f"{self.vendor:04x}:{self.product:04x}"
-
-    @property
     def product_string(self) -> str:
         from .catalog import RECEIVERS
 
@@ -255,14 +246,6 @@ class InputNode:
     @property
     def node(self) -> str:
         return os.path.basename(self.path)
-
-    @property
-    def reports_movement(self) -> bool:
-        return 2 in self.ev_bits  # EV_REL
-
-    @property
-    def mouse_buttons(self) -> list[int]:
-        return sorted(code for code in self.key_bits if 0x110 <= code <= 0x1FF)
 
     def describe(self) -> str:
         iface = f"if{self.interface:02d}" if self.interface is not None else "if??"
@@ -599,14 +582,6 @@ class HidrawTransport:
         assert self.fd is not None
         buffer = array.array("B", bytes([report_id]) + bytes(size - 1))
         fcntl.ioctl(self.fd, HIDIOCGFEATURE(size), buffer, True)
-        return buffer.tobytes()
-
-    def set_feature(self, report_id: int, payload: bytes) -> bytes:
-        self.open()
-        assert self.fd is not None
-        data = bytes([report_id]) + payload
-        buffer = array.array("B", data)
-        fcntl.ioctl(self.fd, HIDIOCSFEATURE(len(buffer)), buffer, True)
         return buffer.tobytes()
 
     # -- Diagnose -------------------------------------------------------

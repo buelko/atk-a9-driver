@@ -16,8 +16,6 @@ from dataclasses import dataclass
 
 from .protocol import DpiCodec, LodTable, PAW3950_LOD, STEP_LOD, ULTRA_LOD, make_dpi_codec
 
-VENDOR_IDS: tuple[int, ...] = (0x373B, 0x3554)
-
 
 @dataclass(frozen=True)
 class Sensor:

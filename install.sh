@@ -44,15 +44,13 @@ for tool in atk-a9 atk-a9-gui atk-a9-tray; do
     echo "verlinkt: /usr/local/bin/$tool"
 done
 
-# Desktop-Eintraege: Exec zeigt auf die Links, nicht auf einen festen Home-Pfad.
+# Desktop-Eintraege (Exec zeigt auf die Links in /usr/local/bin).
 # Gleichnamige Dateien unter ~/.local/share/applications bzw. ~/.config/autostart
 # haben Vorrang - es entstehen keine doppelten Eintraege.
-sed 's|^Exec=.*|Exec=/usr/local/bin/atk-a9-gui|' "$HERE/autostart/atk-a9.desktop" > "$APPS/atk-a9.desktop"
-chmod 0644 "$APPS/atk-a9.desktop"
+install -m 0644 "$HERE/desktop/atk-a9.desktop" "$APPS/atk-a9.desktop"
 echo "Menue-Eintrag: /usr/local/share/applications/atk-a9.desktop"
 if [ "$TRAY" -eq 1 ]; then
     install -d "$AUTOSTART"
-    sed 's|^Exec=.*|Exec=/usr/local/bin/atk-a9-tray|' "$HERE/autostart/atk-a9-tray.desktop" > "$AUTOSTART/atk-a9-tray.desktop"
-    chmod 0644 "$AUTOSTART/atk-a9-tray.desktop"
+    install -m 0644 "$HERE/desktop/atk-a9-tray.desktop" "$AUTOSTART/atk-a9-tray.desktop"
     echo "Tray-Autostart: /etc/xdg/autostart/atk-a9-tray.desktop"
 fi

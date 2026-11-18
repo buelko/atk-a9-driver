@@ -210,12 +210,6 @@ def unpair(data: bytes | int, offset: int = 0) -> int:
     return value
 
 
-def is_unprogrammed(data: bytes, offset: int = 0, width: int = 4) -> bool:
-    """Nicht programmierte Zeilen werden als 0xff ... 0xff geliefert."""
-    chunk = data[offset : offset + width]
-    return len(chunk) == width and all(b == 0xFF for b in chunk)
-
-
 # ---------------------------------------------------------------------------
 # Enkodierung: Polling, Schlaf, Debounce, Lift-off
 # ---------------------------------------------------------------------------
@@ -253,15 +247,6 @@ def polling_to_code(hz: int) -> "int | None":
 
 def polling_from_code(code: int) -> "int | None":
     return POLLING_BY_CODE.get(code)
-
-
-def sleep_code(seconds: int) -> int:
-    if seconds % 10:
-        seconds = (seconds // 10) * 10
-    code = seconds // 10
-    if not 1 <= code <= 0xFF:
-        raise ProtocolError(f"Schlafzeit {seconds}s ausserhalb des Bereichs")
-    return code
 
 
 def sleep_seconds(code: int) -> int:
@@ -421,9 +406,6 @@ class DpiCodec:
             )
         return min(allowed, key=lambda value: (abs(value - dpi), value))
 
-    def is_valid(self, dpi: int) -> bool:
-        return dpi in set(self.allowed_values())
-
     def encode_record(self, x: int, y: int | None = None) -> bytes:
         y = x if y is None else y
         x_byte, x_nib = self.encode_axis(x)
@@ -565,14 +547,6 @@ DPI_ACTION_LABELS: dict[int, str] = {1: "DPI durchschalten", 2: "DPI erhoehen", 
 SCROLL_ACTION_LABELS: dict[int, str] = {1: "links", 2: "rechts"}
 WHEEL_ACTION_LABELS: dict[int, str] = {1: "rad hoch", 2: "rad runter"}
 
-BUTTON_SLOTS: tuple[tuple[int, str], ...] = tuple(
-    (0x0060 + index * 4, name)
-    for index, name in enumerate(
-        ("Linkstaste", "Rechtstaste", "Mittelklick", "Taste 4 (zurueck)", "Taste 5 (vor)", "Unterseite", "Taste 7", "Taste 8",
-         "Taste 9", "Taste 10", "Taste 11", "Taste 12", "Taste 13", "Taste 14", "Taste 15", "Taste 16")
-    )
-)
-
 
 def describe_button_action(cls: int, value1: int, value2: int) -> str:
     if cls == ButtonClass.DISABLED:
@@ -593,34 +567,6 @@ def describe_button_action(cls: int, value1: int, value2: int) -> str:
     return f"{base} (wert1=0x{value1:02x}, wert2=0x{value2:02x})"
 
 
-@dataclass
-class ButtonRecord:
-    index: int
-    address: int
-    raw: bytes
-    checksum_ok: bool
-
-    @property
-    def cls(self) -> int:
-        return self.raw[0]
-
-    @property
-    def values(self) -> tuple[int, int]:
-        return self.raw[1], self.raw[2]
-
-    @property
-    def label(self) -> str:
-        return describe_button_action(self.cls, self.raw[1], self.raw[2])
-
-    def describe(self) -> str:
-        flag = "" if self.checksum_ok else "  [Pruefsumme defekt]"
-        return (
-            f"Taste {self.index + 1:<2} @{self.address:#06x} "
-            f"[{self.raw[0]:02x} {self.raw[1]:02x} {self.raw[2]:02x} {self.raw[3]:02x}] "
-            f"{self.label}{flag}"
-        )
-
-
 # ---------------------------------------------------------------------------
 # Battery
 # ---------------------------------------------------------------------------
@@ -632,15 +578,6 @@ class Battery:
     charging: bool | None = None
     voltage_mv: int | None = None
     raw: bytes = b""
-
-    @property
-    def status_text(self) -> str:
-        if self.percent is None:
-            return "keine Antwort (Maus offline/geschlafen?)"
-        if self.charging is None:
-            return f"{self.percent} %"
-        return f"{self.percent} % ({'laedt' if self.charging else 'im Betrieb'})"
-
 
 def parse_battery(data: bytes, declared: "int | None" = None) -> Battery:
     """Dekodierung abhaengig von der deklarierten Datenlaenge.

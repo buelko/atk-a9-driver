@@ -2,7 +2,7 @@
 Type=Application
 Name=ATK A9 Ultra Batterie
 Comment=Batteriesymbol der ATK A9 Ultra im Systray
-Exec=/home/hmx/AI-Projekte/atk-a9-driver/bin/atk-a9-tray
+Exec=/usr/local/bin/atk-a9-tray
 Icon=battery
 Terminal=false
 Categories=Utility;
