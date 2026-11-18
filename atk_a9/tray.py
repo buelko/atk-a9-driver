@@ -7,6 +7,7 @@ periodisch und oeffnet per Klick die Einstellungs-GUI.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -19,16 +20,51 @@ from gi.repository import GLib, Gtk, GdkPixbuf  # noqa: E402
 import cairo  # noqa: E402
 
 from . import protocol as p  # noqa: E402
-from .device import AtkMouse  # noqa: E402
+from .device import AtkMouse, MouseOffline  # noqa: E402
 from .hidraw import DeviceBusy, DeviceNotFound  # noqa: E402
 
 INTERVAL_SECONDS = 120
 RETRY_SECONDS = 30
 ICON_SIZE = 22
+LOW_BATTERY = 15       # Warnung bei <= 15 %
+LOW_BATTERY_RESET = 20  # erst ab >= 20 % (oder beim Laden) wieder scharf
 GUI_BIN = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "bin", "atk-a9-gui")
 
 
-def draw_battery_pixbuf(percent: int | None, charging: bool) -> GdkPixbuf.Pixbuf:
+def low_battery_step(percent: int | None, charging: bool, warned: bool) -> tuple[bool, bool]:
+    """Entscheidet ueber die Akku-Warnung: (jetzt_warnen, neuer_warned_Zustand).
+
+    Gewarnt wird einmal beim Unterschreiten der Schwelle, nicht bei jeder Abfrage.
+    """
+    if percent is None:
+        return False, warned
+    if charging or percent >= LOW_BATTERY_RESET:
+        return False, False
+    if percent <= LOW_BATTERY and not warned:
+        return True, True
+    return False, warned
+
+
+def notify(title: str, body: str) -> None:
+    """Desktop-Benachrichtigung; fehlt die Infrastruktur, passiert nichts."""
+    try:
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify
+
+        if not Notify.is_initted():
+            Notify.init("ATK A9 Ultra")
+        Notify.Notification.new(title, body, "battery-caution").show()
+        return
+    except Exception:  # noqa: BLE001 - libnotify fehlt oder kein Dienst
+        pass
+    if shutil.which("notify-send"):
+        try:
+            subprocess.run(["notify-send", "-i", "battery-caution", title, body], timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def draw_battery_pixbuf(percent: int | None, charging: bool, stale: bool = False) -> GdkPixbuf.Pixbuf:
     size = ICON_SIZE
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, size, size)
     ctx = cairo.Context(surface)
@@ -60,6 +96,9 @@ def draw_battery_pixbuf(percent: int | None, charging: bool) -> GdkPixbuf.Pixbuf
             r, g, b = (0.95, 0.7, 0.1)
         else:
             r, g, b = (0.3, 0.8, 0.3)
+        if stale:
+            # letzter bekannter Stand (Maus schlaeft): ausgegraut
+            r, g, b = (0.6, 0.6, 0.6)
         ctx.set_source_rgba(r, g, b, 1)
         inner = (w - 3) * level / 100.0
         ctx.rectangle(x + 1.5, y + 1.5, inner, h - 3)
@@ -101,18 +140,25 @@ class TrayApp:
         self.icon.set_title("ATK A9 Ultra")
         self.icon.connect("activate", self.on_activate)
         self.icon.connect("popup-menu", self.on_popup)
-        self.set_state(None, False, "verbinde ...")
         self._busy = False
+        self._last: tuple[int, bool] | None = None  # letzter gelesener Stand
+        self._warned = False
+        self._children: list[subprocess.Popen] = []
+        self.set_state(None, False, "verbinde ...")
         GLib.idle_add(self.schedule_refresh)
 
     # -- Anzeige ------------------------------------------------------------
 
-    def set_state(self, percent: int | None, charging: bool, note: str | None = None) -> None:
-        self.icon.set_from_pixbuf(draw_battery_pixbuf(percent, charging))
+    def set_state(
+        self, percent: int | None, charging: bool, note: str | None = None, stale: bool = False
+    ) -> None:
+        self.icon.set_from_pixbuf(draw_battery_pixbuf(percent, charging, stale))
         if percent is None:
             tooltip = f"ATK A9 Ultra: {note or 'nicht erreichbar'}"
         else:
             tooltip = f"ATK A9 Ultra: {percent} %" + (" (laedt)" if charging else "")
+            if stale:
+                tooltip += " (letzter Stand)"
             if note:
                 tooltip += f"\n{note}"
         self.icon.set_tooltip_text(tooltip)
@@ -134,32 +180,71 @@ class TrayApp:
         charging = False
         note: str | None = None
         retry = False
+        asleep = False
         try:
             with AtkMouse.connect(identify=False) as mouse:
-                response = mouse.command(p.Cmd.GET_BATTERY, expect=p.Cmd.GET_BATTERY)
-                battery = p.parse_battery(response.data, response.declared)
-                percent, charging = battery.percent, bool(battery.charging)
+                # Der Dongle weiss sofort, ob die Maus verbunden ist. Das spart
+                # bei schlafender Maus das Warten auf den Timeout (und haelt die
+                # Geraetesperre nicht unnoetig lange).
+                online = mouse.online_status()
+                if online is not None and online["status"] == 0:
+                    asleep = True
+                else:
+                    response = mouse.command(p.Cmd.GET_BATTERY, expect=p.Cmd.GET_BATTERY)
+                    battery = p.parse_battery(response.data, response.declared)
+                    percent, charging = battery.percent, bool(battery.charging)
+        except MouseOffline:
+            asleep = True
         except DeviceBusy as exc:
             note = str(exc)
             retry = True
         except TimeoutError:
-            note = "Maus schlaeft (bewegen zum Aufwecken)"
+            note = "keine Antwort vom Geraet"
             retry = True
         except (DeviceNotFound, PermissionError, p.ProtocolError, OSError) as exc:
             note = str(exc)
             retry = True
-        GLib.idle_add(self._apply, percent, charging, note, retry)
+        except Exception as exc:  # noqa: BLE001 - sonst bliebe _busy fuer immer gesetzt
+            note = f"{type(exc).__name__}: {exc}"
+            retry = True
+        if asleep:
+            note = "Maus schlaeft (bewegen zum Aufwecken)"
+            retry = True
+        GLib.idle_add(self._apply, percent, charging, note, retry, asleep)
 
-    def _apply(self, percent: int | None, charging: bool, note: str | None, retry: bool) -> bool:
+    def _apply(
+        self, percent: int | None, charging: bool, note: str | None, retry: bool, asleep: bool = False
+    ) -> bool:
         self._busy = False
-        self.set_state(percent, charging, note)
+        self._children = [child for child in self._children if child.poll() is None]
+        if percent is not None:
+            self._last = (percent, charging)
+            self.set_state(percent, charging, note)
+            warn, self._warned = low_battery_step(percent, charging, self._warned)
+            if warn:
+                notify("ATK A9 Ultra: Akku fast leer", f"Noch {percent} % - bitte laden.")
+        elif asleep and self._last is not None:
+            # Schlafende Maus: letzten Stand ausgegraut weiter anzeigen statt "?"
+            self.set_state(self._last[0], False, note, stale=True)
+        else:
+            self.set_state(None, False, note)
         GLib.timeout_add_seconds(RETRY_SECONDS if retry else INTERVAL_SECONDS, self.schedule_refresh)
         return False
+
+    def open_gui(self, _widget: Gtk.Widget | None = None) -> None:
+        """GUI starten. Laeuft sie schon, holt der neue Prozess nur ihr Fenster
+        nach vorn und beendet sich (siehe gui.acquire_instance)."""
+        # beendete Kindprozesse abholen, sonst bleiben Zombies zurueck
+        self._children = [child for child in self._children if child.poll() is None]
+        try:
+            self._children.append(subprocess.Popen([GUI_BIN]))
+        except OSError as exc:
+            notify("ATK A9 Ultra", f"Einstellungen lassen sich nicht starten: {exc}")
 
     # -- Menue --------------------------------------------------------------
 
     def on_activate(self, _icon: Gtk.StatusIcon) -> None:
-        subprocess.Popen([GUI_BIN])
+        self.open_gui()
 
     def on_popup(self, icon: Gtk.StatusIcon, button: int, time: int) -> None:
         menu = Gtk.Menu()
@@ -167,7 +252,7 @@ class TrayApp:
         item.connect("activate", self.refresh)
         menu.append(item)
         item = Gtk.MenuItem(label="Einstellungen oeffnen")
-        item.connect("activate", lambda _w: subprocess.Popen([GUI_BIN]))
+        item.connect("activate", self.open_gui)
         menu.append(item)
         menu.append(Gtk.SeparatorMenuItem())
         item = Gtk.MenuItem(label="Beenden")

@@ -6,7 +6,11 @@ Oberflaeche nicht blockiert (die Maus kann schlafen -> Timeouts).
 
 from __future__ import annotations
 
+import atexit
+import os
 import queue
+import socket
+import tempfile
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -35,6 +39,47 @@ BUTTON_PRESETS: list[tuple[str, tuple[int, int, int] | None]] = [
     ("Polling durchschalten", (0x07, 0x01, 0x00)),
     ("deaktiviert", (0x00, 0x00, 0x00)),
 ]
+
+
+def instance_socket_path() -> str:
+    base = os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir()
+    return os.path.join(base, f"atk-a9-gui-{os.getuid()}.sock")
+
+
+def acquire_instance(path: str | None = None) -> socket.socket | None:
+    """Nur eine GUI gleichzeitig.
+
+    Laeuft schon eine, wird sie gebeten, ihr Fenster nach vorn zu holen, und
+    es kommt None zurueck. Sonst der lauschende Socket dieser Instanz.
+    """
+    path = path or instance_socket_path()
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(path)
+        client.sendall(b"raise")
+        return None
+    except OSError:
+        pass  # keine Instanz (oder verwaister Socket einer abgestuerzten)
+    finally:
+        client.close()
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(path)
+    server.listen(4)
+    server.setblocking(False)
+
+    def cleanup() -> None:
+        server.close()
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+    atexit.register(cleanup)
+    return server
 
 
 class Worker(threading.Thread):
@@ -92,8 +137,9 @@ class Worker(threading.Thread):
 
 
 class App(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(self, instance: socket.socket | None = None) -> None:
         super().__init__()
+        self.instance = instance
         self.title("ATK A9 Ultra")
         self.minsize(560, 560)
         self.worker = Worker()
@@ -122,7 +168,23 @@ class App(tk.Tk):
                     self.statusbar.config(text=f"Anzeigefehler: {type(exc).__name__}: {exc}")
         except queue.Empty:
             pass
+        self._check_instance_requests()
         self.after(PUMP_MS, self._pump)
+
+    def _check_instance_requests(self) -> None:
+        """Ein zweiter Start (z. B. Klick aufs Tray) holt dieses Fenster nach vorn."""
+        if self.instance is None:
+            return
+        try:
+            conn, _ = self.instance.accept()
+        except (BlockingIOError, OSError):
+            return
+        conn.close()
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(300, lambda: self.attributes("-topmost", False))
+        self.focus_force()
 
     def run_job(self, work: Callable[[AtkMouse], Any], done: Callable[[Any], None] | None = None) -> None:
         self._set_busy(True)
@@ -206,7 +268,9 @@ class App(tk.Tk):
             btn.pack(side="left")
             color = tk.Label(row, width=3, relief="groove")
             color.pack(side="left", padx=8)
-            self.dpi_rows.append({"frame": row, "radio": radio, "var": var, "btn": btn, "color": color})
+            self.dpi_rows.append(
+                {"frame": row, "radio": radio, "var": var, "entry": entry, "btn": btn, "color": color}
+            )
 
         foot = ttk.Frame(frame)
         foot.pack(fill="x", padx=8, pady=8)
@@ -344,6 +408,7 @@ class App(tk.Tk):
             state = "normal" if (stage and visible) else "disabled"
             row["radio"].config(state=state)
             row["btn"].config(state=state)
+            row["entry"].config(from_=status.dpi_min, to=status.dpi_max)
             if stage and stage.x is not None:
                 row["var"].set(str(stage.x))
             elif not stage:
@@ -357,12 +422,10 @@ class App(tk.Tk):
 
         # Einstellungen
         if status.system:
-            opts = [str(hz) for hz in (status.max_polling_hz and self._polling_options() or [])]
-            self.polling_box["values"] = opts
+            self.polling_box["values"] = [str(hz) for hz in status.polling_options]
             if status.system.polling_hz:
                 self.polling_var.set(str(status.system.polling_hz))
-        lod_values = self._lod_options()
-        self.lod_box["values"] = [str(v) for v in lod_values]
+        self.lod_box["values"] = [str(v) for v in status.lod_options]
         if status.lod_mm is not None:
             self.lod_var.set(str(status.lod_mm))
         if status.advanced:
@@ -386,13 +449,6 @@ class App(tk.Tk):
             else:
                 row["current"].config(text="-")
         self.statusbar.config(text="Status aktualisiert")
-
-    def _polling_options(self) -> list[int]:
-        limit = self.status.max_polling_hz if self.status and self.status.max_polling_hz else 1000
-        return [hz for hz in (125, 250, 500, 1000, 2000, 4000, 8000) if hz <= limit]
-
-    def _lod_options(self) -> list[float]:
-        return sorted({round((code + 6) / 10, 1) for code in range(1, 12)})
 
     # -- Aktionen -----------------------------------------------------------
 
@@ -446,7 +502,10 @@ class App(tk.Tk):
 
 
 def main() -> int:
-    app = App()
+    instance = acquire_instance()
+    if instance is None:
+        return 0  # laufende Instanz wurde nach vorn geholt
+    app = App(instance)
     app.mainloop()
     return 0
 

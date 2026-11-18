@@ -167,6 +167,9 @@ class MouseStatus:
     buttons: list[ButtonAssignment]
     max_polling_hz: int | None
     notes: list[str] = field(default_factory=list)
+    # Auswahlmoeglichkeiten dieses Modells/Empfaengers (fuer Oberflaechen)
+    polling_options: tuple[int, ...] = ()
+    lod_options: tuple[float, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         def clean(value: Any) -> Any:
@@ -434,6 +437,11 @@ class AtkMouse:
         Prozess (Tray, GUI, CLI) dazwischen dieselbe Zeile veraendert."""
         with self.transport.locked():
             row = self._read_row(address, length)
+            wanted = bytearray(row)
+            for offset, value in updates.items():
+                wanted[offset], wanted[offset + 1] = p.pair(value)
+            if wanted == row:
+                return  # steht schon so im EEPROM: Schreibzyklus sparen
             self._write_pairs(address, row, updates)
 
     # -- Systemzeile (0x0000) ----------------------------------------------
@@ -584,7 +592,8 @@ class AtkMouse:
                 raise ValueError(f"DPI {value} ausserhalb {lo}..{hi} ({family})")
         record = p.dpi_encode(x, y, family)
         address = p.Eeprom.DPI_BASE + index * p.DPI_RECORD_LEN
-        self.write_eeprom(address, record)
+        if self.read_eeprom(address, p.DPI_RECORD_LEN) != record:
+            self.write_eeprom(address, record)
         raw = self.read_eeprom(address, p.DPI_RECORD_LEN)
         got_x, got_y = p.dpi_decode(raw, family)
         if (got_x, got_y) != (x, y):
@@ -731,7 +740,8 @@ class AtkMouse:
         # write_eeprom liest den Record zurueck und wirft WriteVerificationError
         # bei Abweichung. Kein read_buttons() hier: das bricht bei einem leeren
         # Slot davor ab und lieferte dann keinen Eintrag fuer diesen Slot.
-        self.write_eeprom(address, record)
+        if self.read_eeprom(address, p.KEY_RECORD_LEN) != record:
+            self.write_eeprom(address, record)
         return self._button_from_raw(index, address, record)
 
     def read_shortcut(self, slot: int) -> bytes:
@@ -845,6 +855,8 @@ class AtkMouse:
             buttons=buttons,
             max_polling_hz=self.max_polling_hz(),
             notes=list(self.notes),
+            polling_options=tuple(self.polling_options()),
+            lod_options=tuple(sorted(set(self.lod_table().codes.values()))),
         )
 
     # -- Wartung ------------------------------------------------------------
