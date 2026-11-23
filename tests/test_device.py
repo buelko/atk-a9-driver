@@ -216,5 +216,59 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual(data[0], 0x01)  # 1000 Hz
 
 
+class ExportImportTests(unittest.TestCase):
+    def test_export_has_all_sections(self):
+        data = connect().export_settings()
+        for key in (
+            "version", "polling_hz", "stage_count", "dpi", "advanced",
+            "sensor_mode", "buttons", "macros", "wheel_guard_ms",
+        ):
+            self.assertIn(key, data)
+        self.assertEqual(data["version"], AtkMouse.SETTINGS_VERSION)
+        self.assertTrue(data["dpi"])
+        self.assertIn("color", data["dpi"][0])
+
+    def test_import_dry_run_writes_nothing(self):
+        mouse = connect()
+        data = mouse.export_settings()
+        before = len(mouse.transport.writes)
+        changes = mouse.import_settings(data, dry_run=True)
+        self.assertEqual(len(mouse.transport.writes), before)
+        self.assertTrue(all(c.startswith("[Vorschau]") for c in changes))
+
+    def test_import_roundtrip_no_skips(self):
+        mouse = connect()
+        data = mouse.export_settings()
+        changes = mouse.import_settings(data, dry_run=False)
+        skipped = [c for c in changes if c.startswith("uebersprungen")]
+        self.assertEqual(skipped, [])
+
+    def test_import_changes_dpi(self):
+        mouse = connect()
+        data = mouse.export_settings()
+        data["dpi"][0]["x"] = data["dpi"][0]["y"] = 1200
+        mouse.import_settings(data, dry_run=False)
+        stages = mouse.read_dpi_stages(1)
+        self.assertEqual(stages[0].x, 1200)
+
+    def test_import_rejects_unknown_version(self):
+        mouse = connect()
+        with self.assertRaises(ValueError):
+            mouse.import_settings({"version": 999}, dry_run=False)
+
+    def test_import_skips_invalid_value(self):
+        mouse = connect()
+        data = mouse.export_settings()
+        data["polling_hz"] = 99999  # ungueltig
+        changes = mouse.import_settings(data, dry_run=False)
+        self.assertTrue(any(c.startswith("uebersprungen") and "Polling" in c for c in changes))
+
+    def test_set_dpi_color_roundtrip(self):
+        mouse = connect()
+        mouse.set_dpi_color(2, (0x12, 0x34, 0x56))
+        colors = mouse.read_dpi_colors(2)
+        self.assertEqual(colors[1], (0x12, 0x34, 0x56))
+
+
 if __name__ == "__main__":
     unittest.main()

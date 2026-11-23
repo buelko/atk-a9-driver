@@ -5,8 +5,10 @@ Linux-Userspace-Treiber für ATK-/VXE-Mäuse, entwickelt und getestet mit der
 `/dev/hidraw*` – kein Kernelmodul.
 
 - `atk-a9` – Kommandozeile (Status, DPI, Polling, Lift-off, Tasten, …)
-- `atk-a9-gui` – Einstellungsfenster (Tkinter)
-- `atk-a9-tray` – Akku-Symbol für die Leiste (GTK 3), warnt bei ≤ 15 %
+- `atk-a9-gui` – Einstellungsfenster (Tkinter), mit **Sichern…/Laden…** der
+  kompletten Einstellungen
+- `atk-a9-tray` – Akku-Symbol für die Leiste, warnt bei ≤ 15 %. Nutzt
+  **AppIndicator** (Wayland-tauglich) und fällt auf `Gtk.StatusIcon` (X11) zurück.
 
 ## Voraussetzungen
 
@@ -14,7 +16,7 @@ Linux-Userspace-Treiber für ATK-/VXE-Mäuse, entwickelt und getestet mit der
 |---|---|
 | Treiber, CLI | Python ≥ 3.10, nur Standardbibliothek |
 | GUI | Tkinter (`python3-tk`) |
-| Tray | PyGObject mit GTK 3 und cairo (`python3-gi`, `gir1.2-gtk-3.0`, `python3-gi-cairo`); für die Akku-Warnung `gir1.2-notify-0.7` oder `notify-send` |
+| Tray | PyGObject mit GTK 3 und cairo (`python3-gi`, `gir1.2-gtk-3.0`, `python3-gi-cairo`); für die Akku-Warnung `gir1.2-notify-0.7` oder `notify-send`; für Wayland zusätzlich `gir1.2-ayatanaappindicator3-0.1` |
 
 ## Installation
 
@@ -36,8 +38,13 @@ aus `udev/` muss dann von Hand nach `/etc/udev/rules.d/` kopiert werden.
 ```sh
 atk-a9 scan                      # Geräte auflisten
 atk-a9 status                    # kompletter Status (auch --json)
+atk-a9 status --quick            # nur Akku + Polling (schnell)
+atk-a9 status --watch 30         # fortlaufend alle 30 s (Ctrl-C beendet)
+atk-a9 battery --watch 60
 atk-a9 battery
 atk-a9 dpi set 2 1600            # Stufe 2 auf 1600 DPI
+atk-a9 dpi set 2 1600 --select  # setzen und sofort aktiv schalten
+atk-a9 dpi color 2 00FF00        # Farbe der DPI-Stufe 2 (RRGGBB)
 atk-a9 dpi select 3              # aktive Stufe wählen
 atk-a9 polling set 500
 atk-a9 lod set 1.0               # Lift-off in mm (oder code:N)
@@ -60,6 +67,11 @@ atk-a9 longrange an              # Reichweiten-Modus
 atk-a9 wheel-guard 200           # Mausrad-Schutz in ms (0 = aus)
 atk-a9 pair start                # Maus neu mit dem Dongle koppeln
 atk-a9 factory-reset --yes       # Werkseinstellungen
+
+# Komplettes Backup aller Einstellungen (Software-Profil)
+atk-a9 export mein-profil.json   # DPI, Farben, Tasten, Makros, Sensor ...
+atk-a9 import mein-profil.json --dry-run   # Vorschau, nichts schreiben
+atk-a9 import mein-profil.json             # zurückschreiben
 atk-a9 probe                     # Diagnose
 atk-a9 -v status                 # mit allen gesendeten/empfangenen Frames
 ```
@@ -113,6 +125,39 @@ Die GUI bietet dasselbe: im Reiter „Tasten“ über „Ändern…“, Makros i
 | `atk_a9/cli.py`, `gui.py`, `tray.py` | Oberflächen |
 | `atk_a9/fake.py` | simuliertes Gerät für Tests |
 
+## Profile sichern und laden
+
+Das Umschalten der Hardware-Profile funktioniert an der A9 Ultra nicht (die
+Firmware lehnt es ab). `export`/`import` bieten stattdessen ein
+**softwareseitiges Profil-Backup**: eine JSON-Datei mit allen schreibbaren
+Einstellungen (DPI-Stufen inkl. Farben und aktiver Stufe, Polling, Lift-off,
+Debounce/MotionSync/Schlaf, Sensormodus, Winkel, Mausrad-Schutz, Reichweite,
+Tasten, Tastenkombinationen, Makros).
+
+`import` schreibt nur gültige Werte; unpassende überspringt es mit Hinweis,
+statt abzubrechen. `--dry-run` zeigt vorher, was passieren würde. Dieselbe
+Funktion gibt es in der GUI über die Knöpfe **Sichern…** und **Laden…**.
+
+## Wayland
+
+Das Tray wählt sein Icon-Backend automatisch:
+
+- **AppIndicator** (Ayatana oder Ubuntu `AppIndicator3`) – funktioniert unter
+  Wayland (GNOME mit AppIndicator-Erweiterung, KDE Plasma, XFCE) und X11.
+- **`Gtk.StatusIcon`** – klassischer X11-Systray, wenn kein AppIndicator da ist.
+
+Für Wayland `gir1.2-ayatanaappindicator3-0.1` (oder `gir1.2-appindicator3-0.1`)
+installieren. Backend erzwingen: `atk-a9-tray --backend appindicator|statusicon`.
+
+## bash-Completion
+
+`install.sh` legt `/etc/bash_completion.d/atk-a9` an (Unterkommandos, Optionen,
+Aliasnamen). In der aktuellen Shell ohne Installation:
+
+```sh
+source completion/atk-a9.bash
+```
+
 ## Tests
 
 ```sh
@@ -135,5 +180,6 @@ Die Tests laufen gegen das simulierte Gerät und verändern die echte Maus nicht
 - Kopplung und Werkseinstellungen sind ungetestet.
 - Profile umschalten funktioniert an der A9 Ultra nicht: das Gerät lehnt das
   Kommando ab (siehe `docs/PROTOCOL.md`). Das aktive Profil lässt sich lesen.
-- Das Tray nutzt `Gtk.StatusIcon` (X11, z. B. XFCE); unter Wayland erscheint
-  kein Symbol.
+- Unter Wayland zeigt das Tray nur dann ein Symbol, wenn AppIndicator
+  installiert ist (`gir1.2-ayatanaappindicator3-0.1`); ohne diese Bibliothek
+  bleibt nur der X11-`Gtk.StatusIcon`.

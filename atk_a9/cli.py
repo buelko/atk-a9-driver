@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 
 from . import keys as k
 from . import protocol as p
@@ -71,7 +72,15 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    if getattr(args, "watch", None):
+        return _watch(args, lambda: _status_once(args))
+    return _status_once(args)
+
+
+def _status_once(args: argparse.Namespace) -> int:
     with _connect(args) as mouse:
+        if getattr(args, "quick", False):
+            return _status_quick(mouse, args)
         status = mouse.status(include_buttons=not args.no_buttons)
     if args.json:
         print(json.dumps(status.to_dict(), indent=2, ensure_ascii=False))
@@ -119,7 +128,47 @@ def _onoff(value: bool | None) -> str:
     return "?" if value is None else ("an" if value else "aus")
 
 
+def _status_quick(mouse: AtkMouse, args: argparse.Namespace) -> int:
+    """Nur Akku + Polling - schnell, ohne alle EEPROM-Zeilen zu lesen."""
+    response = mouse.command(p.Cmd.GET_BATTERY, expect=p.Cmd.GET_BATTERY)
+    battery = p.parse_battery(response.data, response.declared)
+    system = mouse.read_system()
+    if args.json:
+        print(json.dumps({
+            "percent": battery.percent, "charging": battery.charging,
+            "polling_hz": system.polling_hz, "active_stage": system.active_stage,
+        }))
+        return 0
+    bat = f"{battery.percent}%" if battery.percent is not None else "?"
+    if battery.charging:
+        bat += " (laedt)"
+    print(f"Batterie {bat}  Polling {system.polling_hz or '?'} Hz  aktive Stufe {system.active_stage}")
+    return 0
+
+
+def _watch(args: argparse.Namespace, once) -> int:
+    """Ein Kommando periodisch wiederholen (Ctrl-C beendet)."""
+    interval = max(1.0, float(args.watch))
+    try:
+        while True:
+            if not args.json:
+                print(f"--- {time.strftime('%H:%M:%S')} ---")
+            try:
+                once()
+            except (MouseOffline, DeviceBusy, TimeoutError) as exc:
+                print(f"({exc})", file=sys.stderr)
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        return 0
+
+
 def cmd_battery(args: argparse.Namespace) -> int:
+    if getattr(args, "watch", None):
+        return _watch(args, lambda: _battery_once(args))
+    return _battery_once(args)
+
+
+def _battery_once(args: argparse.Namespace) -> int:
     with _connect(args) as mouse:
         response = mouse.command(p.Cmd.GET_BATTERY, expect=p.Cmd.GET_BATTERY)
         battery = p.parse_battery(response.data, response.declared)
@@ -139,7 +188,15 @@ def cmd_dpi(args: argparse.Namespace) -> int:
     with _connect(args) as mouse:
         if args.dpi_action == "set":
             stage = mouse.set_dpi_stage(args.stage, args.x, args.y)
-            print(f"Stufe {stage.index}: {stage.describe()}")
+            msg = f"Stufe {stage.index}: {stage.describe()}"
+            if getattr(args, "select", False):
+                mouse.select_stage(args.stage)
+                msg += "  (aktiv)"
+            print(msg)
+        elif args.dpi_action == "color":
+            rgb = _parse_hex_color(args.rgb)
+            mouse.set_dpi_color(args.stage, rgb)
+            print(f"Stufe {args.stage}: Farbe #{args.rgb.lstrip('#').upper()}")
         elif args.dpi_action == "select":
             system = mouse.select_stage(args.stage)
             print(f"aktive Stufe: {system.active_stage}")
@@ -153,6 +210,47 @@ def cmd_dpi(args: argparse.Namespace) -> int:
             for stage in mouse.read_dpi_stages():
                 active = " *" if stage.index == system.active_stage else ""
                 print(f"  Stufe {stage.index}: {stage.describe()}{active}")
+    return 0
+
+
+def _parse_hex_color(text: str) -> tuple[int, int, int]:
+    value = text.strip().lstrip("#")
+    if len(value) != 6:
+        raise ValueError(f"Farbe {text!r} muss sechsstellig hex sein (z. B. 00FF00)")
+    try:
+        return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16))
+    except ValueError:
+        raise ValueError(f"Farbe {text!r} ist nicht hexadezimal") from None
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    with _connect(args) as mouse:
+        data = mouse.export_settings()
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    if args.file and args.file != "-":
+        with open(args.file, "w", encoding="utf-8") as fh:
+            fh.write(text + "\n")
+        print(f"Einstellungen gesichert nach {args.file}", file=sys.stderr)
+    else:
+        print(text)
+    return 0
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    if args.file == "-":
+        data = json.load(sys.stdin)
+    else:
+        with open(args.file, encoding="utf-8") as fh:
+            data = json.load(fh)
+    with _connect(args) as mouse:
+        changes = mouse.import_settings(data, dry_run=args.dry_run)
+    head = "Vorschau (nichts geschrieben):" if args.dry_run else "Angewendet:"
+    print(head)
+    for change in changes:
+        print(f"  {change}")
+    skipped = [c for c in changes if c.startswith("uebersprungen")]
+    if skipped and not args.dry_run:
+        print(f"{len(skipped)} Einstellung(en) uebersprungen.", file=sys.stderr)
     return 0
 
 
@@ -417,11 +515,23 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="kompletter Status")
     s.add_argument("--json", action="store_true")
     s.add_argument("--no-buttons", action="store_true")
+    s.add_argument("--quick", action="store_true", help="nur Akku + Polling (schnell)")
+    s.add_argument("--watch", type=float, metavar="SEK", help="fortlaufend alle SEK Sekunden")
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("battery", help="Akkustand")
     s.add_argument("--json", action="store_true")
+    s.add_argument("--watch", type=float, metavar="SEK", help="fortlaufend alle SEK Sekunden")
     s.set_defaults(func=cmd_battery)
+
+    s = sub.add_parser("export", help="alle Einstellungen als JSON sichern")
+    s.add_argument("file", nargs="?", default="-", help="Zieldatei (Standard: Ausgabe)")
+    s.set_defaults(func=cmd_export)
+
+    s = sub.add_parser("import", help="Einstellungen aus JSON zurueckschreiben")
+    s.add_argument("file", help="Backup-Datei (oder - fuer stdin)")
+    s.add_argument("--dry-run", action="store_true", help="nur anzeigen, nichts schreiben")
+    s.set_defaults(func=cmd_import)
 
     s = sub.add_parser("dpi", help="DPI-Stufen")
     dsub = s.add_subparsers(dest="dpi_action")
@@ -429,6 +539,10 @@ def build_parser() -> argparse.ArgumentParser:
     dset.add_argument("stage", type=int)
     dset.add_argument("x", type=int)
     dset.add_argument("y", type=int, nargs="?")
+    dset.add_argument("--select", action="store_true", help="Stufe danach aktiv schalten")
+    dcol = dsub.add_parser("color", help="DPI-Farbe setzen: dpi color <stufe> <RRGGBB>")
+    dcol.add_argument("stage", type=int)
+    dcol.add_argument("rgb", help="Hex-Farbe, z. B. 00FF00")
     dsel = dsub.add_parser("select", help="aktive Stufe waehlen")
     dsel.add_argument("stage", type=int)
     dcnt = dsub.add_parser("stages", help="Anzahl der Stufen setzen")

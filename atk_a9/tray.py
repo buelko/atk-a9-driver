@@ -1,7 +1,14 @@
-"""atk-a9-tray - Batteriesymbol fuer die ATK A9 Ultra im XFCE-Systray.
+"""atk-a9-tray - Batteriesymbol fuer die ATK A9 Ultra in der Leiste.
 
 Zeichnet ein kleines Batterie-Icon (Fuellstand + Farbe), aktualisiert sich
 periodisch und oeffnet per Klick die Einstellungs-GUI.
+
+Backend-Wahl zur Laufzeit:
+  * AppIndicator (Ayatana oder Ubuntu AppIndicator3) - funktioniert unter
+    Wayland (GNOME mit AppIndicator-Erweiterung, KDE, XFCE) und X11.
+  * Fallback Gtk.StatusIcon - klassischer X11-Systray (XFCE, alte Umgebungen).
+Unter Wayland wird AppIndicator bevorzugt, weil Gtk.StatusIcon dort kein
+Symbol zeigt.
 """
 
 from __future__ import annotations
@@ -10,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 
 import gi
@@ -18,6 +26,26 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import GLib, Gtk, GdkPixbuf  # noqa: E402
 
 import cairo  # noqa: E402
+
+
+def _load_appindicator():
+    """AppIndicator-Modul laden (Ayatana bevorzugt), sonst None."""
+    for namespace in ("AyatanaAppIndicator3", "AppIndicator3"):
+        try:
+            gi.require_version(namespace, "0.1")
+            from gi.repository import GLib as _  # noqa: F401
+            module = __import__("gi.repository", fromlist=[namespace])
+            return getattr(module, namespace)
+        except (ValueError, ImportError):
+            continue
+    return None
+
+
+AppIndicator = _load_appindicator()
+
+
+def _running_wayland() -> bool:
+    return bool(os.environ.get("WAYLAND_DISPLAY")) or os.environ.get("XDG_SESSION_TYPE") == "wayland"
 
 from . import protocol as p  # noqa: E402
 from .device import AtkMouse, MouseOffline  # noqa: E402
@@ -144,12 +172,72 @@ def draw_battery_pixbuf(percent: int | None, charging: bool, stale: bool = False
     )
 
 
-class TrayApp:
-    def __init__(self) -> None:
+def save_icon_png(percent: int | None, charging: bool, stale: bool = False) -> str:
+    """Icon als PNG in eine temporaere Datei schreiben (fuer AppIndicator, das
+    nur Icon-Namen/Pfade kennt). Gibt den Dateipfad zurueck."""
+    pixbuf = draw_battery_pixbuf(percent, charging, stale)
+    fd, path = tempfile.mkstemp(prefix="atk-a9-bat-", suffix=".png")
+    os.close(fd)
+    pixbuf.savev(path, "png", [], [])
+    return path
+
+
+class _StatusIconBackend:
+    """Klassischer X11-Systray ueber Gtk.StatusIcon."""
+
+    def __init__(self, app: "TrayApp") -> None:
         self.icon = Gtk.StatusIcon()
         self.icon.set_title("ATK A9 Ultra")
-        self.icon.connect("activate", self.on_activate)
-        self.icon.connect("popup-menu", self.on_popup)
+        self.icon.connect("activate", lambda _i: app.open_gui())
+        self.icon.connect("popup-menu", self._popup)
+        self._app = app
+
+    def set_icon(self, pixbuf, tooltip: str) -> None:
+        self.icon.set_from_pixbuf(pixbuf)
+        self.icon.set_tooltip_text(tooltip)
+
+    def _popup(self, icon, button: int, time: int) -> None:
+        menu = self._app.build_menu()
+        menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
+
+
+class _AppIndicatorBackend:
+    """AppIndicator-Backend - funktioniert unter Wayland und X11."""
+
+    def __init__(self, app: "TrayApp") -> None:
+        self._app = app
+        self._icon_file: str | None = None
+        self.indicator = AppIndicator.Indicator.new(
+            "atk-a9-ultra",
+            "battery",  # Fallback-Icon-Name aus dem Theme, bis das erste PNG da ist
+            AppIndicator.IndicatorCategory.HARDWARE,
+        )
+        self.indicator.set_status(AppIndicator.IndicatorStatus.ACTIVE)
+        # AppIndicator braucht zwingend ein Menue (Linksklick oeffnet es; der
+        # erste Eintrag dient als Standardaktion).
+        self.indicator.set_menu(self._app.build_menu(default_open=True))
+
+    def set_icon(self, pixbuf, tooltip: str) -> None:
+        old = self._icon_file
+        self._icon_file = save_icon_png(
+            self._app._last_percent, self._app._last_charging, self._app._last_stale
+        )
+        self.indicator.set_icon_full(self._icon_file, tooltip)
+        if hasattr(self.indicator, "set_title"):
+            self.indicator.set_title(tooltip)
+        if old and os.path.exists(old):
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+
+
+class TrayApp:
+    def __init__(self, backend: str = "auto") -> None:
+        self._last_percent: int | None = None
+        self._last_charging = False
+        self._last_stale = False
+        self.backend = self._make_backend(backend)
         self._busy = False
         self._last: tuple[int, bool] | None = None  # letzter gelesener Stand
         self._warned = False
@@ -159,10 +247,35 @@ class TrayApp:
 
     # -- Anzeige ------------------------------------------------------------
 
+    def _make_backend(self, choice: str):
+        """Backend waehlen: 'appindicator', 'statusicon' oder 'auto'."""
+        want_indicator = choice == "appindicator" or (
+            choice == "auto" and (AppIndicator is not None and (_running_wayland() or True))
+        )
+        # Unter Wayland ist AppIndicator Pflicht; sonst ist es trotzdem die
+        # robustere Wahl, wenn verfuegbar. Fallback nur, wenn es fehlt.
+        if want_indicator and AppIndicator is not None:
+            return _AppIndicatorBackend(self)
+        if choice == "appindicator" and AppIndicator is None:
+            print(
+                "AppIndicator nicht verfuegbar - installiere "
+                "gir1.2-ayatanaappindicator3-0.1 (oder gir1.2-appindicator3-0.1). "
+                "Fallback auf Gtk.StatusIcon.",
+                file=sys.stderr,
+            )
+        if _running_wayland() and AppIndicator is None:
+            print(
+                "Wayland erkannt, aber AppIndicator fehlt - das Symbol bleibt "
+                "unter Wayland womoeglich unsichtbar. Installiere "
+                "gir1.2-ayatanaappindicator3-0.1.",
+                file=sys.stderr,
+            )
+        return _StatusIconBackend(self)
+
     def set_state(
         self, percent: int | None, charging: bool, note: str | None = None, stale: bool = False
     ) -> None:
-        self.icon.set_from_pixbuf(draw_battery_pixbuf(percent, charging, stale))
+        self._last_percent, self._last_charging, self._last_stale = percent, charging, stale
         if percent is None:
             tooltip = f"ATK A9 Ultra: {note or 'nicht erreichbar'}"
         else:
@@ -171,7 +284,7 @@ class TrayApp:
                 tooltip += " (letzter Stand)"
             if note:
                 tooltip += f"\n{note}"
-        self.icon.set_tooltip_text(tooltip)
+        self.backend.set_icon(draw_battery_pixbuf(percent, charging, stale), tooltip)
 
     # -- Abfrage ------------------------------------------------------------
 
@@ -253,27 +366,44 @@ class TrayApp:
 
     # -- Menue --------------------------------------------------------------
 
-    def on_activate(self, _icon: Gtk.StatusIcon) -> None:
-        self.open_gui()
-
-    def on_popup(self, icon: Gtk.StatusIcon, button: int, time: int) -> None:
+    def build_menu(self, default_open: bool = False) -> Gtk.Menu:
+        """Kontextmenue (von beiden Backends genutzt)."""
         menu = Gtk.Menu()
-        item = Gtk.MenuItem(label="Jetzt aktualisieren")
-        item.connect("activate", self.refresh)
-        menu.append(item)
-        item = Gtk.MenuItem(label="Einstellungen oeffnen")
-        item.connect("activate", self.open_gui)
-        menu.append(item)
+        if default_open:
+            # AppIndicator oeffnet beim Linksklick das Menue; der erste Eintrag
+            # ist dort die naheliegende Standardaktion.
+            item = Gtk.MenuItem(label="Einstellungen oeffnen")
+            item.connect("activate", self.open_gui)
+            menu.append(item)
+            menu.append(Gtk.SeparatorMenuItem())
+            item = Gtk.MenuItem(label="Jetzt aktualisieren")
+            item.connect("activate", self.refresh)
+            menu.append(item)
+        else:
+            item = Gtk.MenuItem(label="Jetzt aktualisieren")
+            item.connect("activate", self.refresh)
+            menu.append(item)
+            item = Gtk.MenuItem(label="Einstellungen oeffnen")
+            item.connect("activate", self.open_gui)
+            menu.append(item)
         menu.append(Gtk.SeparatorMenuItem())
         item = Gtk.MenuItem(label="Beenden")
         item.connect("activate", lambda _w: Gtk.main_quit())
         menu.append(item)
         menu.show_all()
-        menu.popup(None, None, Gtk.StatusIcon.position_menu, icon, button, time)
+        return menu
 
 
-def main() -> int:
-    TrayApp()
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(prog="atk-a9-tray", description="Akku-Symbol fuer die ATK A9 Ultra")
+    parser.add_argument(
+        "--backend", choices=("auto", "appindicator", "statusicon"), default="auto",
+        help="Tray-Backend (Standard auto: AppIndicator wenn vorhanden, sonst StatusIcon)",
+    )
+    args = parser.parse_args(argv)
+    TrayApp(backend=args.backend)
     Gtk.main()
     return 0
 

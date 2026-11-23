@@ -364,6 +364,8 @@ class App(tk.Tk):
         self.lbl_model = ttk.Label(header, text="verbinde...", font=("", 12, "bold"))
         self.lbl_model.pack(side="left")
         ttk.Button(header, text="Aktualisieren", command=self.refresh).pack(side="right")
+        ttk.Button(header, text="Laden...", command=self._import_settings).pack(side="right", padx=4)
+        ttk.Button(header, text="Sichern...", command=self._export_settings).pack(side="right")
 
         batt = ttk.Frame(self)
         batt.pack(fill="x", **pad)
@@ -395,6 +397,66 @@ class App(tk.Tk):
 
         self.statusbar = ttk.Label(self, text="bereit", relief="sunken", anchor="w")
         self.statusbar.pack(fill="x", side="bottom")
+
+    def _export_settings(self) -> None:
+        from tkinter import filedialog
+        import json
+
+        path = filedialog.asksaveasfilename(
+            title="Einstellungen sichern", defaultextension=".json",
+            initialfile="atk-a9-backup.json", filetypes=[("JSON", "*.json"), ("Alle", "*.*")],
+        )
+        if not path:
+            return
+
+        def work(mouse: AtkMouse) -> dict:
+            return mouse.export_settings()
+
+        def done(data: dict) -> None:
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh, indent=2, ensure_ascii=False)
+                self.statusbar.config(text=f"gesichert nach {path}")
+            except OSError as exc:
+                messagebox.showerror("Sichern fehlgeschlagen", str(exc))
+
+        self.run_job(work, done)
+
+    def _import_settings(self) -> None:
+        from tkinter import filedialog
+        import json
+
+        path = filedialog.askopenfilename(
+            title="Einstellungen laden", filetypes=[("JSON", "*.json"), ("Alle", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Laden fehlgeschlagen", str(exc))
+            return
+        if not messagebox.askyesno(
+            "Einstellungen laden",
+            "Alle Einstellungen aus der Datei auf die Maus schreiben?\n"
+            "(DPI, Tasten, Makros, Sensor usw. werden ueberschrieben.)",
+        ):
+            return
+
+        def work(mouse: AtkMouse) -> list:
+            return mouse.import_settings(data, dry_run=False)
+
+        def done(changes: list) -> None:
+            skipped = [c for c in changes if c.startswith("uebersprungen")]
+            self.statusbar.config(
+                text=f"geladen: {len(changes) - len(skipped)} uebernommen, {len(skipped)} uebersprungen"
+            )
+            if skipped:
+                messagebox.showwarning("Teilweise uebersprungen", "\n".join(skipped))
+            self.refresh()
+
+        self.run_job(work, done)
 
     def _build_dpi(self) -> None:
         frame = self.tab_dpi

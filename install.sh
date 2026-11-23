@@ -29,6 +29,7 @@ RULES="$DESTDIR/etc/udev/rules.d"
 BIN="$DESTDIR/usr/local/bin"
 APPS="$DESTDIR/usr/local/share/applications"
 AUTOSTART="$DESTDIR/etc/xdg/autostart"
+COMPLETION="$DESTDIR/etc/bash_completion.d"
 
 install -d "$RULES" "$BIN" "$APPS"
 rm -f "$RULES/99-atk-mouse.rules"
@@ -53,4 +54,11 @@ if [ "$TRAY" -eq 1 ]; then
     install -d "$AUTOSTART"
     install -m 0644 "$HERE/desktop/atk-a9-tray.desktop" "$AUTOSTART/atk-a9-tray.desktop"
     echo "Tray-Autostart: /etc/xdg/autostart/atk-a9-tray.desktop"
+fi
+
+# bash-Completion (optional, schadet nicht, wenn bash-completion fehlt)
+if [ -f "$HERE/completion/atk-a9.bash" ]; then
+    install -d "$COMPLETION"
+    install -m 0644 "$HERE/completion/atk-a9.bash" "$COMPLETION/atk-a9"
+    echo "bash-Completion: /etc/bash_completion.d/atk-a9 (neue Shell oeffnen)"
 fi

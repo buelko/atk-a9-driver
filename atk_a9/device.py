@@ -1042,6 +1042,173 @@ class AtkMouse:
             lod_options=tuple(sorted(set(self.lod_table().codes.values()))),
         )
 
+    # -- Export / Import (Software-Profil-Backup) ---------------------------
+
+    SETTINGS_VERSION = 1
+
+    def export_settings(self) -> dict[str, Any]:
+        """Alle schreibbaren Einstellungen als JSON-faehiges dict sichern.
+
+        Da das Umschalten der Hardware-Profile an der A9 Ultra nicht geht,
+        dient das als softwareseitiges Profil-Backup: DPI-Stufen (inkl.
+        Farben), aktive Stufe, Polling, Lift-off, erweiterte Einstellungen,
+        Sensor, Winkel, Mausrad-Schutz, Reichweite, Tasten, Tastenkombinationen
+        und Makros.
+        """
+        system = self.read_system()
+        advanced = self.read_advanced()
+        sensor = self.read_sensor_row()
+        _, lod_mm = self.read_lod()
+        stage_count = system.stage_count or p.DPI_STAGE_COUNT_MAX
+        stages = self.read_dpi_stages(stage_count)
+
+        dpi: list[dict[str, Any]] = []
+        for stage in stages:
+            entry: dict[str, Any] = {"stage": stage.index, "x": stage.x, "y": stage.y}
+            if stage.color is not None:
+                entry["color"] = "%02X%02X%02X" % stage.color
+            dpi.append(entry)
+
+        buttons: list[dict[str, Any]] = []
+        combos: dict[str, str] = {}
+        for button in self.read_buttons():
+            buttons.append(
+                {"slot": button.slot, "cls": button.cls, "value1": button.value1, "value2": button.value2}
+            )
+            if button.cls == p.ButtonClass.SHORTCUT and button.slot <= k.SHORTCUT_SLOTS:
+                try:
+                    events = self.read_combo(button.slot)
+                except (p.ProtocolError, TimeoutError):
+                    continue
+                if events:
+                    combos[str(button.slot)] = k.describe_combo(events)
+
+        macros: dict[str, str] = {}
+        for number in range(1, k.MACRO_SLOTS + 1):
+            try:
+                events = self.read_macro(number)
+            except (p.ProtocolError, TimeoutError):
+                continue
+            if events:
+                macros[str(number)] = k.format_macro(events)
+
+        angle = self.read_angle()
+        try:
+            wheel_guard = self.read_wheel_guard()
+        except (p.ProtocolError, TimeoutError):
+            wheel_guard = None
+
+        return {
+            "version": self.SETTINGS_VERSION,
+            "model": self.model.name if self.model else None,
+            "cid_mid": self.cid_mid,
+            "polling_hz": system.polling_hz,
+            "stage_count": system.stage_count,
+            "active_stage": system.active_stage,
+            "lod_mm": lod_mm,
+            "dpi": dpi,
+            "advanced": {
+                "debounce_ms": advanced.debounce_ms,
+                "motion_sync": advanced.motion_sync,
+                "sleep_seconds": advanced.sleep_seconds,
+                "straight_line": advanced.straight_line,
+                "ripple": advanced.ripple,
+            },
+            "sensor_mode": sensor.performance_mode,
+            "angle": None if angle is None else {"degrees": angle[0], "snap": angle[1]},
+            "wheel_guard_ms": wheel_guard,
+            "long_range": None if (lr := self.get_far_distance()) is None else bool(lr),
+            "buttons": buttons,
+            "combos": combos,
+            "macros": macros,
+        }
+
+    def import_settings(self, data: dict[str, Any], dry_run: bool = False) -> list[str]:
+        """Einstellungen aus einem export_settings()-dict zurueckschreiben.
+
+        Liefert eine Liste der durchgefuehrten (bzw. bei dry_run geplanten)
+        Aenderungen. Unbekannte oder fuer dieses Modell ungueltige Werte werden
+        uebersprungen und als Hinweis vermerkt, statt den Import abzubrechen.
+        """
+        version = data.get("version")
+        if version != self.SETTINGS_VERSION:
+            raise ValueError(
+                f"Unbekannte Backup-Version {version!r} (erwartet {self.SETTINGS_VERSION})"
+            )
+        done: list[str] = []
+
+        def step(label: str, fn) -> None:
+            if dry_run:
+                done.append(f"[Vorschau] {label}")
+                return
+            try:
+                fn()
+                done.append(label)
+            except (ValueError, p.ProtocolError, TimeoutError, WriteVerificationError) as exc:
+                done.append(f"uebersprungen: {label} ({exc})")
+
+        if data.get("stage_count"):
+            step(f"DPI-Stufenzahl {data['stage_count']}", lambda: self.set_stage_count(data["stage_count"]))
+        for entry in data.get("dpi", []):
+            s, x = entry.get("stage"), entry.get("x")
+            y = entry.get("y", x)
+            if s and x:
+                step(f"DPI-Stufe {s} = {x}/{y}", lambda s=s, x=x, y=y: self.set_dpi_stage(s, x, y))
+            color = entry.get("color")
+            if s and color:
+                rgb = (int(color[0:2], 16), int(color[2:4], 16), int(color[4:6], 16))
+                step(f"DPI-Farbe {s} #{color}", lambda s=s, rgb=rgb: self.set_dpi_color(s, rgb))
+        if data.get("polling_hz"):
+            step(f"Polling {data['polling_hz']} Hz", lambda: self.set_polling(data["polling_hz"]))
+        if data.get("lod_mm") is not None:
+            step(f"Lift-off {data['lod_mm']} mm", lambda: self.set_lod(data["lod_mm"]))
+        adv = data.get("advanced") or {}
+        if any(v is not None for v in adv.values()):
+            step(
+                "Erweitert",
+                lambda: self.set_advanced(
+                    debounce_ms=adv.get("debounce_ms"),
+                    motion_sync=adv.get("motion_sync"),
+                    sleep_seconds=adv.get("sleep_seconds"),
+                    straight_line=adv.get("straight_line"),
+                    ripple=adv.get("ripple"),
+                ),
+            )
+        if data.get("sensor_mode"):
+            step(f"Sensormodus {data['sensor_mode']}", lambda: self.set_sensor_mode(data["sensor_mode"]))
+        angle = data.get("angle")
+        if angle:
+            step(
+                f"Winkel {angle.get('degrees')} Grad",
+                lambda: self.set_angle(
+                    None if angle.get("degrees") is None else int(angle["degrees"]), angle.get("snap")
+                ),
+            )
+        if data.get("wheel_guard_ms") is not None:
+            step(f"Mausrad-Schutz {data['wheel_guard_ms']} ms", lambda: self.set_wheel_guard(data["wheel_guard_ms"]))
+        if data.get("long_range") is not None:
+            step(f"Reichweite {data['long_range']}", lambda: self.set_far_distance(bool(data["long_range"])))
+        # Makros vor den Tasten, damit eine Makro-Zuweisung schon Inhalt vorfindet
+        for number, text in (data.get("macros") or {}).items():
+            step(f"Makro {number}", lambda n=int(number), t=text: self.write_macro(n, t))
+        for slot, text in (data.get("combos") or {}).items():
+            step(f"Tastenkombination {slot}", lambda s=int(slot), t=text: self.set_combo(s, t))
+        for button in data.get("buttons", []):
+            slot, cls = button.get("slot"), button.get("cls")
+            # Shortcut/Makro-Record wird bereits von set_combo/assign geschrieben
+            if cls in (p.ButtonClass.SHORTCUT,):
+                continue
+            if slot and cls is not None:
+                step(
+                    f"Taste {slot} (Klasse {cls})",
+                    lambda s=slot, c=cls, b=button: self.set_button(
+                        s, c, b.get("value1", 0), b.get("value2", 0)
+                    ),
+                )
+        if data.get("active_stage"):
+            step(f"aktive Stufe {data['active_stage']}", lambda: self.select_stage(data["active_stage"]))
+        return done
+
     # -- Wartung ------------------------------------------------------------
 
     def factory_reset(self) -> None:
