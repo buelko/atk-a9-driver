@@ -20,6 +20,8 @@ Linux-Userspace-Treiber für ATK-/VXE-Mäuse, entwickelt und getestet mit der
 
 ## Installation
 
+Kurzanleitung: [INSTALL.md](INSTALL.md).
+
 ```sh
 sudo ./install.sh            # udev-Regel, Programme, Menü-Eintrag, Tray-Autostart
 sudo ./install.sh --no-tray  # ohne Tray-Autostart
