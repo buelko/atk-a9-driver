@@ -8,7 +8,6 @@ aus dem JavaScript der Herstellersoftware ATK HUB 3.2.33 (hub.atk.pro):
 - OpenMouse-Project/mouse-protocol (`docs/atk-testing.md`, `hid.ts`)
 - libatk-rs (EEPROM-Adressen)
 - VoideUI/Linux-ATK
-- xb-bx/atk-a9-ultra-driver (ATK A9 Ultra)
 - szabatoro/atkctl
 
 Mit **[geprüft]** markierte Punkte wurden in diesem Projekt an einer ATK A9
