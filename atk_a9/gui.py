@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """atk-a9-gui - grafische Oberflaeche fuer die ATK A9 Ultra (Tkinter).
 
 Alle Geraetezugriffe laufen in einem Hintergrund-Thread, damit die

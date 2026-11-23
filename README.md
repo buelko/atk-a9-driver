@@ -188,10 +188,16 @@ Die Tests laufen gegen das simulierte Gerät und verändern die echte Maus nicht
 
 ## Lizenz
 
-GNU General Public License v3.0 (siehe [LICENSE](LICENSE)).
+GNU Affero General Public License v3.0 or later (siehe [LICENSE](LICENSE);
+SPDX: `AGPL-3.0-or-later`).
+
+Die AGPL wurde gewählt, weil die Gerätetabelle in `atk_a9/catalog.py` aus dem
+AGPL-lizenzierten OpenMouse-Projekt abgeleitet ist. Für die Nutzung als
+lokales CLI-/Desktop-Werkzeug entspricht sie in der Wirkung der GPL-3.0 – die
+Zusatzpflicht aus §13 greift nur beim Betrieb als Netzwerkdienst.
 
 ## Credits
 
 Eigenständige Python-Implementierung; das Protokollwissen stammt aus offenen
-Reverse-Engineering-Projekten (OpenMouse, libatk-rs, Linux-ATK,
-atk-a9-ultra-driver, atkctl). Details und Lizenzen: [CREDITS.md](CREDITS.md).
+Reverse-Engineering-Projekten (OpenMouse, libatk-rs, Linux-ATK, atkctl).
+Details und Lizenzen: [CREDITS.md](CREDITS.md).

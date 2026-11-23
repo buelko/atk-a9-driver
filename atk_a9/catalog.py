@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """Model-, Sensor- und Dongle-Katalog fuer ATK / VXE / Compx Maeuse.
 
 Der Katalog stammt aus dem offenen OpenMouse-Protokoll-Katalog

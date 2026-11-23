@@ -26,8 +26,8 @@ Dank an die Autoren für ihre Reverse-Engineering-Arbeit.
 (Odin, **GPL-2.0-only**) war in einer früheren Fassung dieser Datei als Quelle
 für „ATK A9 Ultra: Abfrage-Frames" genannt. Diese Angabe war falsch – die
 betreffenden Daten stammen aus dem OpenMouse-Katalog. Das Projekt wird hier
-**nicht** als Quelle verwendet, da GPL-2.0-only (ohne „or later") nicht mit
-GPL-3.0 kompatibel ist.
+**nicht** als Quelle verwendet, da GPL-2.0-only (ohne „or later") weder mit
+GPL-3.0 noch mit AGPL-3.0 kompatibel ist.
 
 ## Abgeleitete Daten: Gerätekatalog
 
@@ -37,27 +37,35 @@ CID/MID, Usage-Page, Feature-Flags). Diese Daten sind aus
 übernommen und lediglich ins Python-Format umgesetzt. Es handelt sich damit
 um ein **abgeleitetes Werk** dieser Datei.
 
-OpenMouse steht unter **AGPL-3.0**. Für den hier vorliegenden Fall – ein
-lokales CLI-/Desktop-Tool ohne Netzwerkdienst – entspricht die AGPL in der
-Wirkung der GPL-3.0; die zusätzliche Pflicht aus AGPL §13 (Quelltext für
-Nutzer über Netzwerk) wird nicht ausgelöst, solange das Programm nicht als
-Netzwerkdienst betrieben wird.
-
-> **Hinweis:** Wer diesen Treiber als Netzwerkdienst anbietet, muss die
-> AGPL-§13-Pflicht der übernommenen Katalogdaten beachten.
+OpenMouse steht unter **AGPL-3.0**. Da diese Daten ein abgeleitetes Werk
+sind, bestimmt ihre Lizenz die Lizenz des Gesamtprojekts mit – siehe unten.
 
 ## Lizenzwahl
 
-Dieses Projekt steht unter der **GNU General Public License v3.0 or later**
-(siehe [LICENSE](LICENSE); SPDX: `GPL-3.0-or-later`).
+Dieses Projekt steht unter der **GNU Affero General Public License v3.0 or
+later** (siehe [LICENSE](LICENSE); SPDX: `AGPL-3.0-or-later`).
+
+**Warum AGPL und nicht GPL?** Der Gerätekatalog ist aus AGPL-3.0-Material
+abgeleitet. Die AGPL ist mit der GPL-3.0 *nicht* in dem Sinne kompatibel,
+dass man AGPL-Code einfach unter GPL-3.0 weitergeben dürfte – AGPL §13
+erlaubt nur das *Kombinieren* beider Lizenzen in einem Projekt, wobei der
+AGPL-Teil AGPL bleibt. Statt einer Mischlizenz steht deshalb das gesamte
+Projekt unter AGPL-3.0-or-later. Das ist die strengere und damit
+zulässige Richtung.
+
+In der Praxis ändert das für Nutzerinnen und Nutzer nichts: Bei einem
+lokalen CLI-/Desktop-Werkzeug entspricht die AGPL der GPL-3.0. Die
+Zusatzpflicht aus §13 (Quelltext für Nutzer, die über ein Netzwerk
+interagieren) wird nur ausgelöst, wenn das Programm als Netzwerkdienst
+betrieben wird.
 
 Kompatibilität der verwendeten Quellen:
 
-| Quelle | Lizenz | Richtung zu GPL-3.0-or-later |
+| Quelle | Lizenz | Richtung zu AGPL-3.0-or-later |
 |---|---|---|
-| OpenMouse | AGPL-3.0 | zulässig – AGPL-3.0-Material darf mit GPL-3.0-Code kombiniert werden (GPL-3.0 §13); die AGPL-Pflichten bleiben für diesen Teil bestehen |
-| libatk-rs | GPL-3.0 | kompatibel |
-| Linux-ATK | GPL-3.0 | kompatibel |
+| OpenMouse | AGPL-3.0 | identisch – maßgeblich für die Lizenzwahl |
+| libatk-rs | GPL-3.0 | kompatibel – GPL-3.0-Code darf nach AGPL-3.0 §13 eingebunden werden |
+| Linux-ATK | GPL-3.0 | kompatibel (wie oben) |
 | atkctl | BSD-3-Clause | kompatibel (permissiv, Copyright-Hinweis unten) |
 
 ### BSD-3-Clause-Hinweis (atkctl)

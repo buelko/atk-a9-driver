@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """atk-a9-tray - Batteriesymbol fuer die ATK A9 Ultra in der Leiste.
 
 Zeichnet ein kleines Batterie-Icon (Fuellstand + Farbe), aktualisiert sich

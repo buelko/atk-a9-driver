@@ -7,7 +7,7 @@ name = "atk-a9-driver"
 version = "0.2.0"
 description = "Linux-Userspace-Treiber fuer ATK/VXE-Maeuse (ATK A9 Ultra) ueber hidraw: CLI, GUI und Tray"
 readme = "README.md"
-license = "GPL-3.0-or-later"
+license = "AGPL-3.0-or-later"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = []  # Treiber und CLI brauchen nur die Standardbibliothek

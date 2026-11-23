@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """atk-a9 - Kommandozeilen-Werkzeug fuer ATK/VXE-Maeuse (z. B. ATK A9 Ultra).
 
 Beispiele:

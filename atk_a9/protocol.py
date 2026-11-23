@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: GPL-3.0-or-later
+# SPDX-License-Identifier: AGPL-3.0-or-later
 """ATK / Compx 16-Byte HID Protokoll (Report-ID 0x08).
 
 Frame-Aufbau (17 Bytes inkl. Report-ID, 16 Bytes Payload):
