@@ -20,7 +20,7 @@ sudo apt install python3 python3-tk \
 ## 2. Installieren
 
 ```sh
-git clone https://github.com/<user>/atk-a9-driver.git
+git clone https://github.com/buelko/atk-a9-driver.git
 cd atk-a9-driver
 sudo ./install.sh              # udev-Regel, Programme, Menü, Tray-Autostart, Completion
 ```
