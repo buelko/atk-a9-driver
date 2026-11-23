@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Ein simuliertes ATK-Geraet (16-Byte-Vendor-Kanal) fuer Tests ohne Hardware.
 
 Imitiert die fuer echte ATK/VXE-Maeuse verifizierten Protokoll-Eigenheiten:

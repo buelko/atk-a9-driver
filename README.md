@@ -185,3 +185,13 @@ Die Tests laufen gegen das simulierte Gerät und verändern die echte Maus nicht
 - Unter Wayland zeigt das Tray nur dann ein Symbol, wenn AppIndicator
   installiert ist (`gir1.2-ayatanaappindicator3-0.1`); ohne diese Bibliothek
   bleibt nur der X11-`Gtk.StatusIcon`.
+
+## Lizenz
+
+GNU General Public License v3.0 (siehe [LICENSE](LICENSE)).
+
+## Credits
+
+Eigenständige Python-Implementierung; das Protokollwissen stammt aus offenen
+Reverse-Engineering-Projekten (OpenMouse, libatk-rs, Linux-ATK,
+atk-a9-ultra-driver, atkctl). Details und Lizenzen: [CREDITS.md](CREDITS.md).

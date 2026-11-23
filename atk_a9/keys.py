@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Tastenereignisse fuer Tastenkombinationen und Makros.
 
 Formate wie in der Herstellersoftware (ATK HUB 3.2.33, COMPX-Protokoll) und

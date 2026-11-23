@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
 """Geraetetreiber fuer ATK-/VXE-Maeuse ueber den 16-Byte-Vendor-Kanal (Report 0x08).
 
 Alle EEPROM-Zugriffe folgen dem Muster "lesen - modifizieren - zurueckschreiben",
